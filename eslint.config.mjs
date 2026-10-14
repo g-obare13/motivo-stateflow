@@ -1,8 +1,8 @@
 /**
- * ESLint flat configuration for Motivo Stateflow.
+ * ESLint flat configuration for the Motivo Stateflow workspace.
  *
- * Lints TypeScript sources and tests with the type-aware parser, lints plain JavaScript scripts
- * with Node globals, and ignores build output so `pnpm lint` only reports on authored files.
+ * Lints every package's TypeScript with the type-aware parser, lints plain JavaScript scripts with
+ * Node globals, and ignores build output so `pnpm lint` only reports on authored files.
  */
 
 import js from "@eslint/js";
@@ -12,7 +12,7 @@ import prettier from "eslint-config-prettier";
 
 export default [
   {
-    ignores: ["dist/**", "node_modules/**", "coverage/**"],
+    ignores: ["**/dist/**", "**/node_modules/**", "**/coverage/**", "**/.vite/**", "*.tgz"],
   },
   js.configs.recommended,
   {
@@ -34,7 +34,8 @@ export default [
       ecmaVersion: "latest",
       sourceType: "module",
       parserOptions: {
-        project: "./tsconfig.json",
+        project: ["./packages/*/tsconfig.json"],
+        tsconfigRootDir: import.meta.dirname,
       },
     },
     plugins: {

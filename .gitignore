@@ -1,5 +1,12 @@
+# Dependencies and build output
 node_modules
-coverage
 dist
+coverage
 .vite
+*.tsbuildinfo
+
+# Packaging artefacts
+*.tgz
+
+# Editor and OS files
 .DS_Store

@@ -11,9 +11,6 @@ importers:
       '@eslint/js':
         specifier: ^9.32.0
         version: 9.39.5
-      '@types/node':
-        specifier: ^24.0.0
-        version: 24.19.2
       '@typescript-eslint/eslint-plugin':
         specifier: ^8.71.2
         version: 8.71.2(@typescript-eslint/parser@8.71.2(eslint@9.39.5)(typescript@5.9.3))(eslint@9.39.5)(typescript@5.9.3)
@@ -26,12 +23,21 @@ importers:
       eslint-config-prettier:
         specifier: ^10.0.0
         version: 10.1.8(eslint@9.39.5)
-      fast-check:
-        specifier: ^4.10.2
-        version: 4.10.2
       prettier:
         specifier: ^3.3.1
         version: 3.9.10
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+
+  packages/core:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      fast-check:
+        specifier: ^4.10.2
+        version: 4.10.2
       tsup:
         specifier: ^9.0.0
         version: 9.0.0(postcss@8.5.30)(typescript@5.9.3)

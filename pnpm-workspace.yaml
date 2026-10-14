@@ -1,0 +1,6 @@
+# pnpm workspace definition.
+#
+# Packages are added here as they gain real code. The published machine engine lives in
+# packages/core; workflow, persistence, actor and tooling packages will follow it.
+packages:
+  - "packages/*"

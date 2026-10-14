@@ -1,4 +1,4 @@
-# Continuous integration for Motivo Stateflow.
+# Continuous integration for the Motivo Stateflow workspace.
 #
 # Verifies linting, compile-time tests, the runtime suite and the production build on Linux and
 # Windows across supported Node.js versions, then consumes the built package the way a downstream
@@ -40,13 +40,13 @@ jobs:
         run: pnpm lint
 
       - name: Type check
-        run: pnpm test:typecheck
+        run: pnpm --filter motivo-stateflow run test:typecheck
 
       - name: Test
-        run: pnpm test:unit
+        run: pnpm --filter motivo-stateflow run test:unit
 
       - name: Build
         run: pnpm build
 
       - name: Verify the built package can be consumed
-        run: node scripts/smoke-test.mjs
+        run: pnpm smoke

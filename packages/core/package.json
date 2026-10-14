@@ -1,0 +1,60 @@
+{
+  "name": "motivo-stateflow",
+  "version": "0.1.0",
+  "description": "State machine engine for TypeScript: typed states, atomic transitions and validated snapshots, with no runtime dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "author": "Motivo Stateflow",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motivo-stateflow/motivo-stateflow.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/motivo-stateflow/motivo-stateflow/tree/main/packages/core",
+  "bugs": {
+    "url": "https://github.com/motivo-stateflow/motivo-stateflow/issues"
+  },
+  "keywords": [
+    "state machine",
+    "typescript",
+    "workflow",
+    "finite state machine",
+    "event-driven"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap --minify",
+    "test": "pnpm run test:unit && pnpm run test:typecheck",
+    "test:unit": "vitest run",
+    "test:typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "node scripts/smoke-test.mjs",
+    "prepublishOnly": "pnpm -w run check"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "fast-check": "^4.10.2",
+    "tsup": "^9.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.0"
+  }
+}
