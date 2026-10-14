@@ -199,6 +199,57 @@ test("supports a state declared before the state that targets it", () => {
   expectTypeOf(machine.state).toEqualTypeOf<"invite_team" | "profile">();
 });
 
+test("keeps prototype-named states in the union, including states nothing targets", () => {
+  const machine = createMachine({
+    id: "prototype-names",
+    initial: "idle",
+    context: {},
+    states: {
+      idle: { on: { GO: "toString" } },
+      toString: { on: { BACK: "idle" } },
+      constructor: {},
+      valueOf: {},
+    },
+  });
+
+  expectTypeOf(machine.state).toEqualTypeOf<"idle" | "toString" | "constructor" | "valueOf">();
+
+  // @ts-expect-error a prototype member is not an event unless it is declared
+  void machine.send("hasOwnProperty");
+});
+
+test("supports empty-string state and event names", () => {
+  const machine = createMachine({
+    id: "edge",
+    initial: "",
+    context: {},
+    states: { "": { on: { "": "next" } }, next: {} },
+  });
+
+  expectTypeOf(machine.state).toEqualTypeOf<"" | "next">();
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<"">();
+});
+
+test("accepts a separately typed guard and a widened event variable", () => {
+  type MachineCtx = { count: number };
+  type StateName = "a" | "b";
+  type EventName = "GO";
+
+  const guard: (args: { context: MachineCtx; state: StateName; event: EventName }) => boolean = ({
+    context,
+  }) => context.count > 0;
+
+  const machine = createMachine<MachineCtx, StateName, EventName>({
+    id: "typed-separately",
+    initial: "a",
+    context: { count: 1 },
+    states: { a: { on: { GO: { target: "b", guard } } }, b: {} },
+  });
+
+  const event: EventName = "GO";
+  void machine.send(event);
+});
+
 test("validates initial and every target form against the declared states", () => {
   // @ts-expect-error "ghost" is not a declared state
   createMachine({ id: "x", initial: "ghost", context: {}, states: { a: {} } });

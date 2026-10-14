@@ -47,11 +47,13 @@
     "test": "pnpm run test:unit && pnpm run test:typecheck",
     "test:unit": "vitest run",
     "test:typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:coverage": "vitest run --coverage",
     "smoke": "node scripts/smoke-test.mjs",
     "prepublishOnly": "pnpm -w run check"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "3.2.0",
     "fast-check": "^4.10.2",
     "tsup": "^9.0.0",
     "typescript": "^5.9.2",
