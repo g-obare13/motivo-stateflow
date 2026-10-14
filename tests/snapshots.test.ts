@@ -1,0 +1,204 @@
+/**
+ * Snapshots, serialization and restoration: validation of restored data, immutability guarantees
+ * and the requirement that restoration is never a transition.
+ */
+
+import { describe, expect, it, vi } from "vitest";
+import { createMachine, SnapshotValidationError } from "../src/index.js";
+import { deferred } from "./helpers.js";
+
+const orderMachine = () =>
+  createMachine({
+    id: "order",
+    initial: "pending",
+    context: { orderId: "order_123", lines: [{ sku: "a", quantity: 1 }] },
+    states: {
+      pending: { on: { CONFIRM: "confirmed" } },
+      confirmed: { on: { RESET: "pending" } },
+    },
+  });
+
+describe("snapshots", () => {
+  it("captures machine identity, state, context and transition metadata", async () => {
+    const machine = orderMachine();
+    const initial = machine.snapshot();
+    const committed = await machine.send("CONFIRM");
+
+    expect(initial).toMatchObject({
+      id: "order",
+      state: "pending",
+      event: null,
+      previous: null,
+      revision: 0,
+      done: false,
+    });
+    expect(committed).toMatchObject({
+      state: "confirmed",
+      event: "CONFIRM",
+      previous: "pending",
+      revision: 1,
+    });
+  });
+
+  it("does not expose internal state through the snapshot context", async () => {
+    const machine = orderMachine();
+    const snapshot = machine.snapshot();
+
+    snapshot.context.orderId = "tampered";
+    snapshot.context.lines[0]!.sku = "tampered";
+
+    expect(machine.context.orderId).toBe("order_123");
+    expect(machine.context.lines[0]!.sku).toBe("a");
+  });
+
+  it("does not expose internal state through the context accessor", () => {
+    const machine = orderMachine();
+    machine.context.orderId = "tampered";
+    expect(machine.snapshot().context.orderId).toBe("order_123");
+  });
+
+  it("serialises through JSON.stringify", async () => {
+    const machine = orderMachine();
+    await machine.send("CONFIRM");
+
+    const parsed: unknown = JSON.parse(JSON.stringify(machine));
+
+    expect(parsed).toMatchObject({ id: "order", state: "confirmed", revision: 1 });
+  });
+});
+
+describe("restoration", () => {
+  it("restores a valid snapshot without running lifecycle hooks", async () => {
+    const entryHook = vi.fn();
+    const hookMachine = createMachine({
+      id: "order",
+      initial: "pending",
+      context: { orderId: "order_123" },
+      states: {
+        pending: { on: { CONFIRM: "confirmed" } },
+        confirmed: { entry: [entryHook] },
+      },
+    });
+
+    const restored = await hookMachine.restore({
+      id: "order",
+      state: "confirmed",
+      context: { orderId: "restored" },
+    });
+
+    expect(restored).toMatchObject({ state: "confirmed", event: null, previous: null });
+    expect(hookMachine.state).toBe("confirmed");
+    expect(hookMachine.context).toEqual({ orderId: "restored" });
+    expect(entryHook).not.toHaveBeenCalled();
+  });
+
+  it("continues processing events after restoration", async () => {
+    const machine = orderMachine();
+
+    await machine.restore(machine.snapshot());
+    await machine.send("CONFIRM");
+    await machine.send("RESET");
+
+    expect(machine.state).toBe("pending");
+    expect(machine.snapshot().revision).toBe(2);
+  });
+
+  it("round-trips through JSON", async () => {
+    const machine = orderMachine();
+    await machine.send("CONFIRM");
+    const serialised = JSON.parse(JSON.stringify(machine.snapshot())) as unknown;
+
+    const target = orderMachine();
+    await target.restore(serialised);
+
+    expect(target.state).toBe("confirmed");
+    expect(target.context).toEqual(machine.context);
+  });
+
+  it("ignores fields it does not need and keeps its own revision counter", async () => {
+    const machine = orderMachine();
+    await machine.send("CONFIRM");
+
+    const restored = await machine.restore({
+      id: "order",
+      state: "pending",
+      context: { orderId: "order_123", lines: [] },
+      event: "IGNORED",
+      previous: "IGNORED",
+      revision: 999,
+      extra: "ignored",
+    });
+
+    expect(restored.state).toBe("pending");
+    expect(restored.revision).toBe(1);
+  });
+
+  const invalid: Array<{ name: string; snapshot: unknown }> = [
+    { name: "null", snapshot: null },
+    { name: "undefined", snapshot: undefined },
+    { name: "a string", snapshot: "order" },
+    { name: "a number", snapshot: 7 },
+    { name: "an array", snapshot: [] },
+    { name: "a missing id", snapshot: { state: "confirmed", context: {} } },
+    { name: "a mismatched id", snapshot: { id: "other", state: "confirmed", context: {} } },
+    { name: "a missing state", snapshot: { id: "order", context: {} } },
+    { name: "an undeclared state", snapshot: { id: "order", state: "ghost", context: {} } },
+    {
+      name: "a prototype state name",
+      snapshot: { id: "order", state: "toString", context: {} },
+    },
+    { name: "a missing context", snapshot: { id: "order", state: "confirmed" } },
+    { name: "a null context", snapshot: { id: "order", state: "confirmed", context: null } },
+    { name: "a primitive context", snapshot: { id: "order", state: "confirmed", context: 7 } },
+    {
+      name: "an unclonable context",
+      snapshot: { id: "order", state: "confirmed", context: { run: () => 1 } },
+    },
+  ];
+
+  it.each(invalid)("rejects $name", async ({ snapshot }) => {
+    const machine = orderMachine();
+    await expect(machine.restore(snapshot)).rejects.toBeInstanceOf(SnapshotValidationError);
+  });
+
+  it("leaves the machine untouched when a snapshot is rejected", async () => {
+    const machine = orderMachine();
+    await machine.send("CONFIRM");
+
+    await expect(machine.restore({ id: "order", state: "ghost", context: {} })).rejects.toBeInstanceOf(
+      SnapshotValidationError,
+    );
+
+    expect(machine.state).toBe("confirmed");
+    expect(machine.context).toEqual({ orderId: "order_123", lines: [{ sku: "a", quantity: 1 }] });
+    expect(machine.snapshot().revision).toBe(1);
+  });
+
+  it("queues restoration behind pending events", async () => {
+    const gate = deferred<boolean>();
+    const machine = createMachine({
+      id: "order",
+      initial: "pending",
+      context: { value: 1 },
+      states: {
+        pending: {
+          on: { CONFIRM: { target: "confirmed", guard: () => gate.promise } },
+        },
+        confirmed: {},
+      },
+    });
+
+    const transition = machine.send("CONFIRM");
+    const restoration = machine.restore({ id: "order", state: "pending", context: { value: 2 } });
+
+    expect(machine.state).toBe("pending");
+
+    gate.resolve(true);
+    await transition;
+    await restoration;
+
+    expect(machine.state).toBe("pending");
+    expect(machine.context).toEqual({ value: 2 });
+    expect(machine.snapshot().revision).toBe(1);
+  });
+});
