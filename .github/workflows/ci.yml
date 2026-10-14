@@ -1,8 +1,9 @@
 # Continuous integration for the Motivo Stateflow workspace.
 #
-# Verifies linting, compile-time tests, the runtime suite and the production build on Linux and
-# Windows across supported Node.js versions, then consumes the built package the way a downstream
-# project would.
+# Verifies linting, compile-time tests, the runtime suite, coverage thresholds and the production
+# build on Linux and Windows across the supported Node.js versions (22, 24 and 26, per the Node
+# release schedule), then consumes the built package the way a downstream project would: once as a
+# local smoke test, and once per TypeScript version from the documented floor to the latest release.
 name: CI
 
 on:
@@ -19,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [20, 22]
+        node: [22, 24, 26]
 
     steps:
       - uses: actions/checkout@v4
@@ -45,8 +46,19 @@ jobs:
       - name: Test
         run: pnpm --filter motivo-stateflow run test:unit
 
+      # Coverage is measured on one configuration: the tally depends on the provider and the
+      # runtime, so a single authoritative run keeps the gate meaningful instead of version specific.
+      - name: Check coverage thresholds
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: pnpm test:coverage
+
       - name: Build
         run: pnpm build
 
       - name: Verify the built package can be consumed
         run: pnpm smoke
+
+      # Runs on one configuration because it installs several TypeScript releases from the registry.
+      - name: Verify consumers across TypeScript versions
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: pnpm test:consumer

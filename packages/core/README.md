@@ -119,7 +119,7 @@ pnpm add motivo-stateflow
 # or: yarn add motivo-stateflow
 ```
 
-**Requirements:** Node.js 18 or newer (the library uses `structuredClone` when available and falls
+**Requirements:** Node.js 22 or newer (the library uses `structuredClone` when available and falls
 back to JSON cloning otherwise), and TypeScript 5.4 or newer to consume the published types.
 
 **Module system:** the package is **ESM-only**. Use `import` from ESM or TypeScript with
@@ -1516,11 +1516,16 @@ export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (ac
 | `id`       | `string`            | Machine identifier.                                                             |
 | `state`    | `TState`            | Committed state.                                                                |
 | `context`  | `TContext`          | Cloned context.                                                                 |
-| `event`    | `TEvent \| null`    | Event that produced this snapshot; `null` for initial or restored snapshots.     |
-| `previous` | `TState \| null`    | State before the transition; `null` for initial or restored snapshots.           |
+| `event`    | `TEvent \| null`    | The event that produced this snapshot, or `null` when none did.                 |
+| `previous` | `TState \| null`    | The state before the transition that produced this snapshot, or `null` when no transition did. |
 | `revision` | `number`            | Committed transitions on this instance. Never restored from storage.             |
 | `done`     | `boolean`           | `true` when the current state declares no outgoing transitions.                  |
 | `schemaVersion` | `number`       | Version stamped by the machine, checked by `restore()`.                          |
+
+The snapshots returned by `send()` and delivered to subscribers describe the transition that produced
+them, so `event` and `previous` are filled in. Snapshots from `machine.snapshot()`, `toJSON()` and
+`restore()` are reads of a committed state rather than the result of a transition, so both fields are
+`null` there.
 
 #### Exported errors
 
@@ -1791,7 +1796,9 @@ console.log(state); // "pending"
 ```
 
 Annotating the definition in a variable requires the published types to reference `NoInfer`, so
-consumers need **TypeScript 5.4 or newer**.
+consumers need **TypeScript 5.4 or newer**. The published declarations are verified against the
+floor, the development version and the latest release by `pnpm test:consumer`, which installs the
+packed tarball into a throwaway project and type checks it with `skipLibCheck` disabled.
 
 What stays a runtime concern (and is covered by validation + tests):
 
@@ -1841,10 +1848,12 @@ Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantic
 ```bash
 pnpm install
 pnpm test          # unit tests (Vitest) + compile-time tests + tsc --noEmit
+pnpm test:coverage # the same suite with the coverage thresholds enforced
+pnpm test:consumer # packs the package and type checks a consumer per TypeScript version
 pnpm lint          # ESLint
 pnpm build         # tsup ESM bundle with declarations and source maps
 pnpm smoke         # imports the built package as a consumer would
-pnpm check         # lint + test + build + smoke
+pnpm check         # lint + test + coverage + build + smoke + consumer verification
 ```
 
 The suite is organised into focused files:
@@ -1860,6 +1869,7 @@ The suite is organised into focused files:
 | `tests/snapshots.test.ts`     | Serialization, restoration validation, immutability, queued restoration.   |
 | `tests/isolation.test.ts`     | Instance isolation, nested context, unusual identifiers, resilience.       |
 | `tests/regressions.test.ts`   | Defects reported against earlier revisions.                               |
+| `tests/runtime-fallbacks.test.ts` | The JSON clone fallback and error rendering when value conversion throws. |
 | `tests/properties.test.ts`    | fast-check invariants over generated event sequences.                      |
 | `tests/types.test-d.ts`       | Compile-time inference and rejection tests.                                |
 

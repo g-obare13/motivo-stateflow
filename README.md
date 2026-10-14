@@ -31,8 +31,9 @@ verified as available before publication.
   concurrent `send()` calls never commit against stale state.
 - Snapshots, subscriptions and validated restoration, including a `schemaVersion` check and an
   optional `parseContext` validator for contexts that JSON cannot represent.
-- 156 runtime tests and 16 compile-time tests, including property-based invariants, plus CI across
-  Linux and Windows on Node 20 and 22.
+- 145 runtime tests and 19 compile-time tests, including property-based invariants, coverage
+  thresholds over the engine source, and consumer verification across TypeScript 5.4, 5.9 and 7.0.
+  CI runs on Linux and Windows on Node 22, 24 and 26.
 
 Full API guide, examples and semantics: [packages/core/README.md](packages/core/README.md).
 
@@ -56,15 +57,17 @@ Future packages (`workflow`, `persistence`, `persistence-sqlite`, `persistence-p
 
 ```bash
 pnpm install            # install the workspace
-pnpm check              # lint, test, build and smoke test everything
+pnpm check              # everything below, in order
 pnpm lint               # eslint across the workspace
 pnpm test               # unit, compile-time and property tests for every package
+pnpm test:coverage      # the same suite with coverage thresholds enforced
 pnpm build              # bundle every package
 pnpm smoke              # import the built engine package the way a consumer would
+pnpm test:consumer      # install the packed tarball into a throwaway project per TypeScript version
 ```
 
-Node.js 18 or newer and pnpm 10 are required. TypeScript 5.4 or newer is required to consume the
-published types.
+Node.js 22 or newer and pnpm 10 are required. TypeScript 5.4 or newer is required to consume the
+published types, and `pnpm test:consumer` proves that floor against the packed artifact.
 
 ## Roadmap
 
