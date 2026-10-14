@@ -1653,13 +1653,30 @@ annotated form when hooks reassign boolean or numeric fields.
   to rebuild values that JSON cannot carry, such as `Date` or `Map`:
 
 ```ts
-const machine = createMachine(definition, {
-  schemaVersion: 2,
-  parseContext: (input) => {
-    const raw = input as { orderId: string; placedAt: string };
-    return { orderId: raw.orderId, placedAt: new Date(raw.placedAt) };
+import { createMachine } from "motivo-stateflow";
+
+type OrderContext = { orderId: string; placedAt: Date };
+
+const context: OrderContext = { orderId: "order_123", placedAt: new Date() };
+
+const machine = createMachine(
+  {
+    id: "order",
+    initial: "pending",
+    context,
+    states: { pending: { on: { CONFIRM: "confirmed" } }, confirmed: {} },
   },
-});
+  {
+    schemaVersion: 2,
+    // JSON stores a Date as a string, so rebuild it before the machine uses the context.
+    parseContext: (input) => {
+      const raw = input as { orderId: string; placedAt: string };
+      return { orderId: raw.orderId, placedAt: new Date(raw.placedAt) };
+    },
+  },
+);
+
+console.log(machine.snapshot().schemaVersion); // 2
 ```
 
 Restoring a snapshot is not event sourcing; an event log and replay are out of scope.
@@ -1757,6 +1774,8 @@ console.log(state); // "pending"
 A factory function works too, because a returned object literal keeps its literals:
 
 ```ts
+import { createMachine } from "motivo-stateflow";
+
 const createOrderMachine = () =>
   createMachine({
     id: "order",
@@ -1764,6 +1783,11 @@ const createOrderMachine = () =>
     context: {},
     states: { pending: { on: { CONFIRM: "confirmed" } }, confirmed: {} },
   });
+
+const machine = createOrderMachine();
+const state: "pending" | "confirmed" = machine.state;
+
+console.log(state); // "pending"
 ```
 
 Annotating the definition in a variable requires the published types to reference `NoInfer`, so
