@@ -8,7 +8,7 @@
 
 import { expectTypeOf, test } from "vitest";
 import { createMachine } from "../src/index.js";
-import type { MachineSnapshot } from "../src/index.js";
+import type { MachineDefinition, MachineSnapshot } from "../src/index.js";
 
 type OrderContext = { orderId: string; paymentAuthorized: boolean };
 type OrderState = "pending" | "confirmed" | "processing" | "shipped";
@@ -156,4 +156,125 @@ test("infers guard, action and lifecycle arguments", () => {
       b: {},
     },
   });
+});
+
+test("derives the state union from the states map, including states nothing targets", () => {
+  const machine = createMachine({
+    id: "pipeline",
+    initial: "queued",
+    context: { jobId: "J-1" },
+    states: {
+      queued: { on: { START: "running", CANCEL: "cancelled" } },
+      running: { on: { FINISH: "succeeded" } },
+      succeeded: {},
+      cancelled: {},
+      // Nothing targets these two, so they exist only as declarations. They must still be part
+      // of the state union, and declaring them must not be a type error.
+      maintenance: { entry: [({ state }) => void state] },
+      archived: {},
+    },
+  });
+
+  expectTypeOf(machine.state).toEqualTypeOf<
+    "queued" | "running" | "succeeded" | "cancelled" | "maintenance" | "archived"
+  >();
+
+  // The event union still comes only from the declared `on` maps.
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<
+    "START" | "CANCEL" | "FINISH"
+  >();
+});
+
+test("supports a state declared before the state that targets it", () => {
+  const machine = createMachine({
+    id: "onboarding",
+    initial: "profile",
+    context: {},
+    states: {
+      invite_team: { on: { BACK: "profile" } },
+      profile: { on: { NEXT: "invite_team" } },
+    },
+  });
+
+  expectTypeOf(machine.state).toEqualTypeOf<"invite_team" | "profile">();
+});
+
+test("validates initial and every target form against the declared states", () => {
+  // @ts-expect-error "ghost" is not a declared state
+  createMachine({ id: "x", initial: "ghost", context: {}, states: { a: {} } });
+
+  // @ts-expect-error "ghost" is not a declared state
+  createMachine({ id: "x", initial: "a", context: {}, states: { a: { on: { GO: "ghost" } } } });
+
+  // The object form is validated too. The directive sits on the line TypeScript reports the
+  // error on, so it survives formatting of the surrounding call.
+  createMachine({
+    id: "x",
+    initial: "a",
+    context: {},
+    // @ts-expect-error "ghost" is not a declared state
+    states: { a: { on: { GO: { target: "ghost" } } } },
+  });
+});
+
+test("keeps the state union precise when a definition is annotated", () => {
+  type OrderState = "pending" | "confirmed";
+  type OrderEvent = "CONFIRM";
+
+  const definition: MachineDefinition<Record<string, never>, OrderState, OrderEvent> = {
+    id: "order",
+    initial: "pending",
+    context: {},
+    states: {
+      pending: { on: { CONFIRM: "confirmed" } },
+      confirmed: {},
+    },
+  };
+
+  const machine = createMachine(definition);
+  expectTypeOf(machine.state).toEqualTypeOf<OrderState>();
+});
+
+test("requires an annotation when a definition is held in a mutable variable", () => {
+  // A mutable variable widens `initial` to `string`, which cannot be checked against the state
+  // union. Annotating it with `MachineDefinition<...>` (or using `as const` on the literals)
+  // keeps inference precise; without that, the definition is rejected.
+  const definition = {
+    id: "order",
+    initial: "pending",
+    context: {},
+    states: {
+      pending: { on: { CONFIRM: "confirmed" } },
+      confirmed: {},
+    },
+  };
+
+  // @ts-expect-error `initial` has widened to string; annotate the definition instead
+  createMachine(definition);
+});
+
+test("types the machine options", () => {
+  type ReportContext = { when: Date };
+
+  const context: ReportContext = { when: new Date(0) };
+  const definition = {
+    id: "report",
+    initial: "open",
+    context,
+    states: { open: {} },
+  } as const;
+
+  createMachine(definition, {
+    schemaVersion: 2,
+    parseContext: (input) => {
+      expectTypeOf(input).toEqualTypeOf<unknown>();
+      return context;
+    },
+  });
+
+  // @ts-expect-error parseContext must return the machine's context type
+  createMachine(definition, { parseContext: () => ({ wrong: true }) });
+
+  // @ts-expect-error schemaVersion is a number
+  createMachine(definition, { schemaVersion: "2" });
 });

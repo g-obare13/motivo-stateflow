@@ -62,12 +62,18 @@ export type ActionFn<TContext, TState extends string, TEvent extends string> = (
  * @typeParam TEvent - Union of declared event names.
  */
 export type TransitionDefinition<TContext, TState extends string, TEvent extends string> = {
-  /** Declared state to enter. Defaults to the current state (self-transition). */
-  target?: TState;
+  /**
+   * Declared state to enter. Defaults to the current state (self-transition).
+   *
+   * The `NoInfer` wrapper keeps this value position out of type inference: `TState` must come
+   * from the `states` map keys, otherwise a target that happens to be mentioned here would
+   * narrow the union and every other declared state would be rejected.
+   */
+  target?: NoInfer<TState>;
   /** Condition that must return `true` for the transition to be committed. */
-  guard?: GuardFn<TContext, TState, TEvent>;
+  guard?: GuardFn<TContext, NoInfer<TState>, NoInfer<TEvent>>;
   /** Actions executed after exit hooks and before entry hooks. */
-  actions?: Array<ActionFn<TContext, TState, TEvent>>;
+  actions?: Array<ActionFn<TContext, NoInfer<TState>, NoInfer<TEvent>>>;
 };
 
 /**
@@ -79,19 +85,27 @@ export type TransitionDefinition<TContext, TState extends string, TEvent extends
  */
 export type StateDefinition<TContext, TState extends string, TEvent extends string> = {
   /** Hooks executed when the state is entered, after transition actions. */
-  entry?: Array<ActionFn<TContext, TState, TEvent>>;
+  entry?: Array<ActionFn<TContext, NoInfer<TState>, NoInfer<TEvent>>>;
   /** Hooks executed when the state is left, before transition actions. */
-  exit?: Array<ActionFn<TContext, TState, TEvent>>;
+  exit?: Array<ActionFn<TContext, NoInfer<TState>, NoInfer<TEvent>>>;
   /**
-   * Event map for the state. A string value is shorthand for `{ target: value }`. An event that
-   * is not a declared own key of this map is reported as invalid for the state.
+   * Event map for the state. A string value is shorthand for `{ target: value }`. A key that is
+   * not declared here is not part of the machine's event union, so it cannot be sent.
+   *
+   * The map's keys are the inference source for `TEvent`, and the shorthand target is wrapped in
+   * `NoInfer` for the same reason `target` is.
    */
-  on?: Partial<Record<TEvent, TState | TransitionDefinition<TContext, TState, TEvent>>>;
+  on?: Partial<
+    Record<TEvent, NoInfer<TState> | TransitionDefinition<TContext, TState, TEvent>>
+  >;
 };
 
 /**
- * A complete machine definition. `states` is keyed by state name and `initial` must be one of
- * those keys, which makes the state union inferable from the definition.
+ * A complete machine definition.
+ *
+ * `states` is keyed by state name, and it is the single source of the state union: every key
+ * becomes part of `TState`, even a state that no transition targets (an entry-only or planned
+ * state). `initial` and the transition targets are checked against that union.
  *
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TState - Union of declared state names.
@@ -100,8 +114,13 @@ export type StateDefinition<TContext, TState extends string, TEvent extends stri
 export type MachineDefinition<TContext, TState extends string, TEvent extends string> = {
   /** Stable machine identifier, echoed in snapshots and error messages. */
   id: string;
-  /** State the machine starts in. Must be a declared state. */
-  initial: TState;
+  /**
+   * State the machine starts in. Must be a declared state.
+   *
+   * The `NoInfer` wrapper keeps this value position out of type inference, so `TState` is
+   * derived from the `states` keys alone.
+   */
+  initial: NoInfer<TState>;
   /** Initial context. Must be a plain object and structured-cloneable. */
   context: TContext;
   /** Declared states. Every transition target must be a key of this object. */
@@ -130,6 +149,13 @@ export type MachineSnapshot<TContext, TState extends string, TEvent extends stri
   revision: number;
   /** `true` when the current state declares no outgoing transitions. */
   done: boolean;
+  /**
+   * Version of the snapshot format, taken from the machine's `schemaVersion` option.
+   *
+   * `restore()` rejects a snapshot whose version differs from the machine's, which stops data
+   * written by an older shape of the machine from being applied silently.
+   */
+  schemaVersion: number;
 };
 
 /**
@@ -145,6 +171,36 @@ export type Subscription<TContext, TState extends string, TEvent extends string>
 
 /** Removes a single subscription. Safe to call more than once. */
 export type Unsubscribe = () => void;
+
+/**
+ * Optional behaviour for a machine, passed as the second argument to `createMachine`.
+ *
+ * @typeParam TContext - Shape of the machine context.
+ */
+export type MachineOptions<TContext> = {
+  /**
+   * Version stamped into every snapshot and checked by `restore()`.
+   *
+   * Defaults to `1`. Bump it when the context shape or the transition graph changes in a way that
+   * makes previously persisted snapshots unsafe to apply; `restore()` then rejects the old data
+   * instead of applying it silently.
+   */
+  schemaVersion?: number;
+  /**
+   * Validates and rehydrates the context of a restored snapshot.
+   *
+   * `restore()` can only check that a stored context is a plain object of cloneable values. It
+   * cannot know which TypeScript type the context is supposed to have, so without this function a
+   * stored context whose shape has drifted is applied as-is. Supply a validator to close that gap:
+   * it receives the raw `context` value from the snapshot and must return a valid context, or
+   * throw to reject the snapshot. It is also the place to rebuild values that JSON cannot carry,
+   * such as `Date` or `Map`.
+   *
+   * @param input - The raw `context` value found in the snapshot.
+   * @returns A valid context for the machine.
+   */
+  parseContext?: (input: unknown) => TContext;
+};
 
 /**
  * A running machine instance.
@@ -195,6 +251,12 @@ export interface Machine<TContext, TState extends string, TEvent extends string>
    * Runs no lifecycle hooks and notifies no subscribers, because restoration is not a
    * transition. Malformed input rejects with `SnapshotValidationError` and leaves the machine
    * untouched.
+   *
+   * The snapshot's `id` and `state` are checked, the context must be a plain object of cloneable
+   * values, and the snapshot's `schemaVersion` must match the machine's (a snapshot without that
+   * field is accepted, so data written before versioning keeps working). When the machine was
+   * created with `parseContext`, that function validates and rehydrates the stored context, and
+   * an error thrown by it rejects the snapshot.
    *
    * @param snapshot - A snapshot produced by `snapshot()` or `toJSON()`.
    * @returns The restored snapshot.

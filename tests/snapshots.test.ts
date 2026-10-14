@@ -4,8 +4,12 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { createMachine, SnapshotValidationError } from "../src/index.js";
-import { deferred } from "./helpers.js";
+import {
+  createMachine,
+  MachineConfigurationError,
+  SnapshotValidationError,
+} from "../src/index.js";
+import { deferred, createLooseMachine } from "./helpers.js";
 
 const orderMachine = () =>
   createMachine({
@@ -200,5 +204,154 @@ describe("restoration", () => {
     expect(machine.state).toBe("pending");
     expect(machine.context).toEqual({ value: 2 });
     expect(machine.snapshot().revision).toBe(1);
+  });
+});
+
+describe("snapshot schema version", () => {
+  it("stamps the machine's schema version into every snapshot", async () => {
+    const machine = createMachine(
+      {
+        id: "order",
+        initial: "pending",
+        context: { value: 1 },
+        states: { pending: { on: { CONFIRM: "confirmed" } }, confirmed: {} },
+      },
+      { schemaVersion: 2 },
+    );
+
+    expect(machine.snapshot().schemaVersion).toBe(2);
+    await expect(machine.send("CONFIRM")).resolves.toMatchObject({ schemaVersion: 2 });
+  });
+
+  it("rejects a snapshot written by a different schema version", async () => {
+    const machine = createMachine(
+      {
+        id: "order",
+        initial: "pending",
+        context: { value: 1 },
+        states: { pending: {} },
+      },
+      { schemaVersion: 2 },
+    );
+
+    await expect(
+      machine.restore({ id: "order", state: "pending", context: { value: 1 }, schemaVersion: 1 }),
+    ).rejects.toBeInstanceOf(SnapshotValidationError);
+    expect(machine.context).toEqual({ value: 1 });
+
+    await expect(
+      machine.restore({ id: "order", state: "pending", context: { value: 9 }, schemaVersion: 2 }),
+    ).resolves.toMatchObject({ schemaVersion: 2, context: { value: 9 } });
+  });
+
+  it("accepts a snapshot that predates versioning", async () => {
+    const machine = createMachine({
+      id: "order",
+      initial: "pending",
+      context: { value: 1 },
+      states: { pending: {} },
+    });
+
+    await expect(
+      machine.restore({ id: "order", state: "pending", context: { value: 4 } }),
+    ).resolves.toMatchObject({ context: { value: 4 }, schemaVersion: 1 });
+  });
+
+  it("rejects invalid options at creation time", () => {
+    const definition = {
+      id: "order",
+      initial: "pending",
+      context: {},
+      states: { pending: {} },
+    };
+
+    expect(() => createLooseMachine(definition, { schemaVersion: -1 })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { schemaVersion: 1.5 })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { schemaVersion: "1" as never })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { parseContext: "nope" as never })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { schemaVersion: 3 })).not.toThrow();
+  });
+});
+
+describe("context validation on restore", () => {
+  type DatedContext = { when: Date; label: string };
+
+  const createDatedMachine = (parseContext?: (input: unknown) => DatedContext) => {
+    const context: DatedContext = { when: new Date("2020-01-01T00:00:00.000Z"), label: "start" };
+
+    return createMachine(
+      {
+        id: "report",
+        initial: "open",
+        context,
+        states: { open: { on: { CLOSE: "closed" } }, closed: {} },
+      },
+      parseContext ? { parseContext } : {},
+    );
+  };
+
+  it("applies the stored context as-is when no validator is configured", async () => {
+    const machine = createDatedMachine();
+
+    await machine.restore({
+      id: "report",
+      state: "open",
+      context: { when: "2020-01-01T00:00:00.000Z", label: "restored" },
+    });
+
+    // Documented limitation: shape-only validation cannot know the context's static type.
+    expect(typeof machine.context.when).toBe("string");
+  });
+
+  it("rehydrates values JSON cannot carry when a validator is configured", async () => {
+    const parseContext = (input: unknown): DatedContext => {
+      const raw = input as { when: string; label: string };
+      return { when: new Date(raw.when), label: raw.label };
+    };
+    const machine = createDatedMachine(parseContext);
+
+    await machine.send("CLOSE");
+    const stored = JSON.parse(JSON.stringify(machine.snapshot())) as unknown;
+
+    const resumed = createDatedMachine(parseContext);
+    await resumed.restore(stored);
+
+    expect(resumed.context.when).toBeInstanceOf(Date);
+    expect(resumed.context.when.toISOString()).toBe("2020-01-01T00:00:00.000Z");
+    expect(resumed.state).toBe("closed");
+  });
+
+  it("rejects the snapshot and preserves the cause when the validator throws", async () => {
+    const failure = new Error("unexpected context shape");
+    const machine = createDatedMachine(() => {
+      throw failure;
+    });
+
+    const outcome = await machine.restore({ id: "report", state: "open", context: { nope: true } })
+      .then(
+        () => "restored",
+        (error: unknown) => error,
+      );
+
+    expect(outcome).toBeInstanceOf(SnapshotValidationError);
+    expect((outcome as SnapshotValidationError).cause).toBe(failure);
+    expect(machine.state).toBe("open");
+  });
+
+  it("leaves the machine untouched when the validated context is not cloneable", async () => {
+    const machine = createDatedMachine(() => ({ when: new Date(0), label: () => "fn" }) as never);
+
+    await expect(
+      machine.restore({ id: "report", state: "open", context: { label: "x" } }),
+    ).rejects.toBeInstanceOf(SnapshotValidationError);
+    expect(machine.state).toBe("open");
   });
 });

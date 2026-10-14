@@ -120,7 +120,7 @@ pnpm add motivo-stateflow
 ```
 
 **Requirements:** Node.js 18 or newer (the library uses `structuredClone` when available and falls
-back to JSON cloning otherwise).
+back to JSON cloning otherwise), and TypeScript 5.4 or newer to consume the published types.
 
 **Module system:** the package is **ESM-only**. Use `import` from ESM or TypeScript with
 `"module": "nodenext"`. From CommonJS, load it with a dynamic import:
@@ -1396,7 +1396,7 @@ the step *is* the state and it round-trips through storage.
 
 ## API reference
 
-### `createMachine(definition)`
+### `createMachine(definition, options?)`
 
 Returns a machine. The definition is validated eagerly: a malformed definition throws
 `MachineConfigurationError` immediately instead of failing during an event.
@@ -1407,6 +1407,43 @@ Returns a machine. The definition is validated eagerly: a malformed definition t
 | `initial` | yes      | A declared state. The machine starts here.                                                 |
 | `context` | yes      | Plain object; must be structured-cloneable. Deep cloned per machine instance.              |
 | `states`  | yes      | Map of state name to state definition. Every transition target must be a declared state.    |
+
+#### Machine options
+
+| Option | Type | Description |
+| --- | --- | --- |
+| `schemaVersion` | `number` (default `1`) | Stamped into every snapshot and checked by `restore()`. Bump it when the context shape or transition graph changes, and old snapshots are rejected instead of applied silently. |
+| `parseContext` | `(input: unknown) => TContext` | Validates and rehydrates a restored context. Must return a valid context or throw; a throw rejects the snapshot with the original error on `cause`. |
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+type ReportContext = { generatedAt: Date; label: string };
+
+const context: ReportContext = { generatedAt: new Date(), label: "daily" };
+
+const machine = createMachine(
+  {
+    id: "report",
+    initial: "open",
+    context,
+    states: { open: { on: { CLOSE: "closed" } }, closed: {} },
+  },
+  {
+    schemaVersion: 2,
+    // JSON turns a Date into a string, so put it back before the machine uses the context.
+    parseContext: (input) => {
+      const raw = input as { generatedAt: string; label: string };
+      if (typeof raw.generatedAt !== "string" || typeof raw.label !== "string") {
+        throw new Error("stored report context is not the expected shape");
+      }
+      return { generatedAt: new Date(raw.generatedAt), label: raw.label };
+    },
+  },
+);
+
+console.log(machine.snapshot().schemaVersion); // 2
+```
 
 #### State definition
 
@@ -1483,6 +1520,7 @@ export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (ac
 | `previous` | `TState \| null`    | State before the transition; `null` for initial or restored snapshots.           |
 | `revision` | `number`            | Committed transitions on this instance. Never restored from storage.             |
 | `done`     | `boolean`           | `true` when the current state declares no outgoing transitions.                  |
+| `schemaVersion` | `number`       | Version stamped by the machine, checked by `restore()`.                          |
 
 #### Exported errors
 
@@ -1600,13 +1638,29 @@ annotated form when hooks reassign boolean or numeric fields.
 
 - `restore()` validates the snapshot: unknown fields are ignored, while a non-object input, a
   mismatched `id`, an undeclared state (including prototype names such as `toString`), a missing or
-  non-plain-object context, or an unclonable context all reject with `SnapshotValidationError`.
+  non-plain-object context, an unclonable context, and a `schemaVersion` that does not match the
+  machine all reject with `SnapshotValidationError`. A snapshot with no `schemaVersion` was written
+  before versioning existed and is still accepted.
 - `restore()` is queued behind pending events, so it can never race an in-flight transition.
 - `restore()` runs no lifecycle hooks and notifies no subscribers, because restoration is not a
   transition.
 - `revision` is machine-local and is never taken from the stored snapshot.
 - Only the snapshot is serialized. Functions (guards, actions, hooks) belong to the definition, which
   must be identical when you restore.
+- The stored context is validated by shape only, unless the machine was created with a
+  `parseContext` option. That validator receives the raw stored value and must return a valid
+  context or throw; a throw rejects the snapshot with the original error on `cause`. It is the place
+  to rebuild values that JSON cannot carry, such as `Date` or `Map`:
+
+```ts
+const machine = createMachine(definition, {
+  schemaVersion: 2,
+  parseContext: (input) => {
+    const raw = input as { orderId: string; placedAt: string };
+    return { orderId: raw.orderId, placedAt: new Date(raw.placedAt) };
+  },
+});
+```
 
 Restoring a snapshot is not event sourcing; an event log and replay are out of scope.
 
@@ -1664,14 +1718,62 @@ console.log(state); // "pending"
 
 What the compiler enforces:
 
+- The **state union is the `states` map**: every declared key is a valid state, including a state
+  that no transition targets (an entry-only, planned or unreachable state).
 - Unknown event names are rejected at the call site.
-- Transition targets must be state names that the definition declares.
+- `initial` and every transition target (shorthand and object form) must be a declared state.
 - Guards, actions and hooks receive the typed context and the machine's state/event unions.
 - The context type flows into guards, actions, hooks, snapshots and subscribers.
 
+### Keeping the union precise
+
+The state and event unions are built from the keys of your definition, so the definition must keep
+its literal types. An inline object literal does this automatically. A definition kept in a mutable
+variable widens (`initial` becomes `string`), so annotate it:
+
+```ts
+import { createMachine } from "motivo-stateflow";
+import type { MachineDefinition } from "motivo-stateflow";
+
+type OrderState = "pending" | "confirmed";
+type OrderEvent = "CONFIRM";
+
+const definition: MachineDefinition<Record<string, never>, OrderState, OrderEvent> = {
+  id: "order",
+  initial: "pending",
+  context: {},
+  states: {
+    pending: { on: { CONFIRM: "confirmed" } },
+    confirmed: {},
+  },
+};
+
+const machine = createMachine(definition);
+const state: OrderState = machine.state;
+
+console.log(state); // "pending"
+```
+
+A factory function works too, because a returned object literal keeps its literals:
+
+```ts
+const createOrderMachine = () =>
+  createMachine({
+    id: "order",
+    initial: "pending",
+    context: {},
+    states: { pending: { on: { CONFIRM: "confirmed" } }, confirmed: {} },
+  });
+```
+
+Annotating the definition in a variable requires the published types to reference `NoInfer`, so
+consumers need **TypeScript 5.4 or newer**.
+
 What stays a runtime concern (and is covered by validation + tests):
 
-- Which events are accepted in *which* state (type-level narrowing by state is on the roadmap).
+- Which events are accepted in *which* state. A guard declared in one state still receives the
+  machine-wide state and event unions, so a comparison such as `state === "pending"` compiles inside
+  another state's guard. Narrowing these parameter types per state is on the roadmap.
 - State-dependent context rules (`can only ship after payment`).
 - Anything arriving from the network, storage or plain JavaScript.
 
@@ -1690,10 +1792,10 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 | No durable execution | Snapshots can be persisted and restored, but there is no checkpointing, lease/ownership, or recovery loop. |
 | Unbounded queue | The internal queue has no depth limit or backpressure; `whenIdle()` is the only queue control. |
 | Context must be plain and cloneable | `Date`, `Map` and `Set` survive cloning, but class instances lose their prototype and accessor properties are evaluated once at creation. Keep domain behaviour outside the context. |
-| Serialization is JSON-shaped | Non-JSON values (`bigint`, cyclic structures) make `JSON.stringify` throw; and `restore()` validates shape, not your context's schema, so a value of the wrong type can be restored. Validate persisted payloads yourself. |
+| Serialization is JSON-shaped | Non-JSON values (`bigint`, cyclic structures) make `JSON.stringify` throw, and `restore()` validates shape rather than your context's TypeScript type. Pass a `parseContext` option to validate and rehydrate the stored context; without it, a value of the wrong type can still be restored. `schemaVersion` rejects snapshots written by a different version of the machine. |
 | ESM-only | CommonJS must use `require`-of-ESM support or a dynamic `import()`. |
 | Minified class names | The published bundle mangles class identifiers, so the static `SomeError.name` is unreliable. Use `instanceof` and the instance's `error.name` - the constructors always set it correctly. |
-| Type inference caveat | A declared state that **no** transition targets is not part of the inferred state union, so the compiler reports it as an unknown property. Ensure every declared state is targeted by at least one transition, or annotate the definition explicitly (`const definition: MachineDefinition<Ctx, "a" \| "b", "GO"> = {...}`) when you need an unreachable state. |
+| Type inference | The state union follows the `states` map keys, so a state that nothing targets is still a valid declared state. The union therefore depends on literal types: annotate a definition that is stored in a mutable variable (see [Keeping the union precise](#keeping-the-union-precise)). |
 
 Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantics intact:
 

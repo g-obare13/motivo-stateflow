@@ -10,6 +10,7 @@ import {
   InvalidTransitionError,
   MachineConfigurationError,
 } from "../src/index.js";
+import type { MachineDefinition } from "../src/index.js";
 import { asEvent, createLooseMachine } from "./helpers.js";
 
 const trafficMachine = () =>
@@ -216,7 +217,12 @@ describe("attempts to reach undeclared states", () => {
   });
 
   it("cannot be introduced by mutating the definition after creation", async () => {
-    const definition = {
+    // Literal types matter here: a definition kept in a variable must be annotated (or use
+    // `as const` on the literals) so the state union follows the `states` keys.
+    type OrderState = "pending" | "confirmed";
+    type OrderEvent = "CONFIRM";
+
+    const definition: MachineDefinition<Record<string, never>, OrderState, OrderEvent> = {
       id: "order",
       initial: "pending",
       context: {},
@@ -228,7 +234,7 @@ describe("attempts to reach undeclared states", () => {
     const machine = createMachine(definition);
 
     (definition.states.pending.on as Record<string, string>).CONFIRM = "ghost";
-    (definition.states as Record<string, unknown>).ghost = {};
+    (definition.states as unknown as Record<string, unknown>).ghost = {};
 
     await expect(machine.send("CONFIRM")).resolves.toMatchObject({ state: "confirmed" });
   });

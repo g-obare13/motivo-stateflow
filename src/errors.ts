@@ -6,6 +6,9 @@
  * check. Messages always include the machine id and, when relevant, the current state, the
  * event and the target state. Sensitive context values are never included in messages.
  *
+ * Every class accepts the standard `ErrorOptions`, so a lower level failure can be preserved on
+ * `error.cause` instead of being flattened into a message.
+ *
  * @packageDocumentation
  */
 
@@ -18,7 +21,7 @@
  *   await machine.send("SHIP");
  * } catch (error) {
  *   if (error instanceof StateflowError) {
- *     reportToTelemetry(error.name, error.message);
+ *     reportToTelemetry(error.name, error.message, error.cause);
  *   }
  *   throw error;
  * }
@@ -27,27 +30,29 @@
 export class StateflowError extends Error {
   /**
    * @param message - Human readable description of the failure.
+   * @param options - Standard error options; `cause` carries the underlying failure.
    */
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "StateflowError";
   }
 }
 
 /**
- * Thrown by `createMachine()` when a definition is malformed.
+ * Thrown by `createMachine()` when a definition or an option is malformed.
  *
  * Raised for a missing or blank `id`, a missing or non-cloneable `context`, an empty or invalid
  * `states` map, an `initial` state that is not declared, a transition target that is not
- * declared, and hooks that are not arrays of functions. Configuration problems always fail at
- * creation time rather than during event processing.
+ * declared, hooks that are not arrays of functions, and invalid machine options. Configuration
+ * problems always fail at creation time rather than during event processing.
  */
 export class MachineConfigurationError extends StateflowError {
   /**
    * @param message - Human readable description of the invalid configuration.
+   * @param options - Standard error options; `cause` carries the underlying failure.
    */
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "MachineConfigurationError";
   }
 }
@@ -60,9 +65,10 @@ export class MachineConfigurationError extends StateflowError {
 export class InvalidEventError extends StateflowError {
   /**
    * @param message - Human readable description of the unrecognised event.
+   * @param options - Standard error options; `cause` carries the underlying failure.
    */
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "InvalidEventError";
   }
 }
@@ -76,9 +82,10 @@ export class InvalidEventError extends StateflowError {
 export class InvalidTransitionError extends StateflowError {
   /**
    * @param message - Human readable description of the rejected transition.
+   * @param options - Standard error options; `cause` carries the underlying failure.
    */
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "InvalidTransitionError";
   }
 }
@@ -92,9 +99,10 @@ export class InvalidTransitionError extends StateflowError {
 export class GuardRejectedError extends StateflowError {
   /**
    * @param message - Human readable description of the rejected guard.
+   * @param options - Standard error options; `cause` carries the underlying failure.
    */
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "GuardRejectedError";
   }
 }
@@ -103,14 +111,17 @@ export class GuardRejectedError extends StateflowError {
  * Thrown by `restore()` when a serialized snapshot is malformed.
  *
  * Raised for non-object input, a mismatched machine id, an undeclared state name, a missing or
- * non-cloneable context, and any other snapshot that cannot be applied safely.
+ * non-cloneable context, a snapshot whose `schemaVersion` does not match the machine, and a
+ * context rejected by the machine's `parseContext` option (the original failure is preserved on
+ * `cause`).
  */
 export class SnapshotValidationError extends StateflowError {
   /**
    * @param message - Human readable description of the invalid snapshot.
+   * @param options - Standard error options; `cause` carries the underlying failure.
    */
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = "SnapshotValidationError";
   }
 }

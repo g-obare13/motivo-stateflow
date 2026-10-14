@@ -6,7 +6,7 @@
  */
 
 import { createMachine } from "../src/index.js";
-import type { Machine, MachineDefinition } from "../src/index.js";
+import type { Machine, MachineDefinition, MachineOptions } from "../src/index.js";
 
 /** A promise plus its resolvers, for controlling asynchronous guards and actions. */
 export type Deferred<T> = {
@@ -28,12 +28,16 @@ export const deferred = <T = void>(): Deferred<T> => {
 
 /**
  * Creates a machine from an arbitrary value so runtime validation can be exercised with
- * definitions that the compiler would otherwise reject.
+ * definitions and options that the compiler would otherwise reject.
  */
 export const createLooseMachine = (
   definition: unknown,
+  options?: MachineOptions<Record<string, unknown>>,
 ): Machine<Record<string, unknown>, string, string> =>
-  createMachine(definition as unknown as MachineDefinition<Record<string, unknown>, string, string>);
+  createMachine(
+    definition as unknown as MachineDefinition<Record<string, unknown>, string, string>,
+    options,
+  );
 
 /** Casts an arbitrary string into the declared event union for negative runtime tests. */
 export const asEvent = <TEvent extends string>(event: string): TEvent => event as TEvent;

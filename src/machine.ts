@@ -21,6 +21,7 @@ import type {
   GuardFn,
   Machine,
   MachineDefinition,
+  MachineOptions,
   MachineSnapshot,
   Subscription,
   Unsubscribe,
@@ -90,6 +91,7 @@ type ListenerRecord<TContext, TState extends string, TEvent extends string> = {
  */
 export function createMachine<TContext extends object, TState extends string, TEvent extends string>(
   definition: MachineDefinition<TContext, TState, TEvent>,
+  options: MachineOptions<TContext> = {},
 ): Machine<TContext, TState, TEvent> {
   const raw = definition as unknown as {
     id?: unknown;
@@ -129,6 +131,25 @@ export function createMachine<TContext extends object, TState extends string, TE
       recognizedEvents.add(eventName);
     }
   }
+
+  const rawOptions = options as unknown as { schemaVersion?: unknown; parseContext?: unknown };
+  if (
+    rawOptions.schemaVersion !== undefined &&
+    (typeof rawOptions.schemaVersion !== "number" ||
+      !Number.isSafeInteger(rawOptions.schemaVersion) ||
+      rawOptions.schemaVersion < 0)
+  ) {
+    throw new MachineConfigurationError(
+      `Machine "${machineId}" option "schemaVersion" must be a non-negative integer.`,
+    );
+  }
+  if (rawOptions.parseContext !== undefined && typeof rawOptions.parseContext !== "function") {
+    throw new MachineConfigurationError(
+      `Machine "${machineId}" option "parseContext" must be a function.`,
+    );
+  }
+  const schemaVersion = (rawOptions.schemaVersion as number | undefined) ?? 1;
+  const parseContext = rawOptions.parseContext as ((input: unknown) => TContext) | undefined;
 
   let currentState = initialState;
   let currentContext: TContext = cloneContext(raw.context as TContext, () => {
@@ -180,6 +201,7 @@ export function createMachine<TContext extends object, TState extends string, TE
     previous,
     revision,
     done: isTerminal(state),
+    schemaVersion,
   });
 
   const snapshot = (): MachineSnapshot<TContext, TState, TEvent> =>
@@ -340,13 +362,26 @@ export function createMachine<TContext extends object, TState extends string, TE
             `Snapshot state ${describe(state)} is not declared by machine "${machineId}".`,
           );
         }
+
+        // Snapshots written before versioning existed have no field, and are still accepted.
+        const storedVersion = candidate.schemaVersion;
+        if (storedVersion !== undefined && storedVersion !== schemaVersion) {
+          throw new SnapshotValidationError(
+            `Snapshot schemaVersion ${describe(storedVersion)} does not match machine "${machineId}" schemaVersion ${schemaVersion}.`,
+          );
+        }
+
         assertPlainObject(
           context,
           `Snapshot context for machine "${machineId}" must be a plain object.`,
           "snapshot",
         );
 
-        const nextContext = cloneContext(context, () => {
+        const validatedContext = parseContext
+          ? parseRestoredContext(parseContext, context, machineId)
+          : (context as TContext);
+
+        const nextContext = cloneContext(validatedContext, () => {
           throw new SnapshotValidationError(
             `Snapshot context for machine "${machineId}" must be structured-cloneable.`,
           );
@@ -370,6 +405,25 @@ export function createMachine<TContext extends object, TState extends string, TE
 
 /** Error kind selector used by {@link assertPlainObject}. */
 type ErrorKind = "configuration" | "snapshot";
+
+/**
+ * Runs a machine's `parseContext` validator against a stored context, converting any failure into
+ * a {@link SnapshotValidationError} whose `cause` preserves the original error.
+ */
+const parseRestoredContext = <TContext>(
+  parseContext: (input: unknown) => TContext,
+  context: unknown,
+  machineId: string,
+): TContext => {
+  try {
+    return parseContext(context);
+  } catch (cause) {
+    throw new SnapshotValidationError(
+      `Snapshot context for machine "${machineId}" was rejected by parseContext.`,
+      { cause },
+    );
+  }
+};
 
 /** Ownership check that ignores inherited prototype members. */
 const hasOwn = (target: Record<string, unknown>, key: string): boolean =>
