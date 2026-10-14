@@ -1,0 +1,60 @@
+{
+  "name": "motivo-stateflow",
+  "version": "0.1.0",
+  "description": "Production-quality TypeScript state machine library for Node.js and framework-independent applications.",
+  "license": "MIT",
+  "type": "module",
+  "author": "Motivo Stateflow",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motivo-stateflow/motivo-stateflow.git"
+  },
+  "homepage": "https://github.com/motivo-stateflow/motivo-stateflow",
+  "bugs": {
+    "url": "https://github.com/motivo-stateflow/motivo-stateflow/issues"
+  },
+  "keywords": [
+    "state machine",
+    "typescript",
+    "workflow",
+    "finite state machine",
+    "event-driven"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap --minify",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "test": "pnpm run test:unit && pnpm run test:typecheck",
+    "test:unit": "vitest run",
+    "test:typecheck": "tsc --noEmit -p tsconfig.json",
+    "smoke": "node scripts/smoke-test.mjs",
+    "check": "pnpm run lint && pnpm run test && pnpm run build && pnpm run smoke"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "@types/node": "^24.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.71.2",
+    "@typescript-eslint/parser": "^8.71.2",
+    "eslint": "^9.32.0",
+    "eslint-config-prettier": "^10.0.0",
+    "fast-check": "^4.10.2",
+    "prettier": "^3.3.1",
+    "tsup": "^9.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.0"
+  },
+  "packageManager": "pnpm@10.33.2"
+}
