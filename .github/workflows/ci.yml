@@ -1,0 +1,52 @@
+# Continuous integration for Motivo Stateflow.
+#
+# Verifies linting, compile-time tests, the runtime suite and the production build on Linux and
+# Windows across supported Node.js versions, then consumes the built package the way a downstream
+# project would.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm test:typecheck
+
+      - name: Test
+        run: pnpm test:unit
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify the built package can be consumed
+        run: node scripts/smoke-test.mjs
