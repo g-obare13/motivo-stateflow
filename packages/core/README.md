@@ -1,6 +1,6 @@
 # Motivo Stateflow
 
-A production-quality, framework-independent **state machine library for TypeScript**.
+A framework-independent **state machine engine for TypeScript**.
 
 Declare the states of a process once, drive it with events, and let the library enforce the rules -
 instead of scattering `status` checks, boolean flags and ad-hoc conditionals across your codebase.
@@ -10,7 +10,8 @@ import { createMachine } from "motivo-stateflow";
 ```
 
 - **Typed end to end** - state names, event names and context shape are inferred from the definition.
-  Unknown events and invalid transition targets are compile errors.
+  Event payloads are checked too: payload-free events may be sent as strings, and payload events
+  use a typed object with a `type` discriminator.
 - **Atomic transitions** - guards, exit hooks, actions and entry hooks all run against staged values.
   The machine commits only when every one of them succeeds, so a failure changes nothing.
 - **Deterministic concurrency** - events are processed FIFO per machine. Concurrent `send()` calls
@@ -28,6 +29,7 @@ import { createMachine } from "motivo-stateflow";
 - [Five-minute tutorial](#five-minute-tutorial)
 - [Core concepts](#core-concepts)
 - [Nested states](#nested-states)
+- [Typed event payloads](#typed-event-payloads)
 - [Examples](#examples)
   - [1. Guarded transition with async work](#1-guarded-transition-with-async-work)
   - [2. Updating context safely](#2-updating-context-safely)
@@ -130,12 +132,6 @@ back to JSON cloning otherwise), and TypeScript 5.4 or newer to consume the publ
 ```ts
 const { createMachine } = await import("motivo-stateflow");
 ```
-
-**Package name note:** `motivo-stateflow` was verified as available on the npm registry before
-publication (`https://registry.npmjs.org/motivo-stateflow` returns `404`). If it is taken by the time
-you publish, the documented fallback scope is `@motivo/stateflow`, which was also unclaimed at the
-same check. Do not silently rename the project: update the package name, repository slug and CI
-configuration together.
 
 ---
 
@@ -369,38 +365,28 @@ active. Nesting groups behaviour that shares a context and a set of transitions.
 
 ```ts
 import { createMachine } from "motivo-stateflow";
-import type { NestedMachineDefinition } from "motivo-stateflow";
 
-type OrderPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
-type OrderEvent = "SUBMIT" | "BACK" | "PUBLISH" | "RESET";
-type OrderContext = { paymentAuthorized: boolean };
-
-const definition: NestedMachineDefinition<OrderContext, OrderPath, OrderEvent> = {
+const machine = createMachine({
   id: "order",
   initial: "draft",
-  context: { paymentAuthorized: false },
+  context: {},
   states: {
     draft: {
       initial: "editing",
-      states: {
-        editing: { on: { SUBMIT: "draft.reviewing" } },
-        reviewing: { on: { BACK: "editing", PUBLISH: "published" } },
-      },
-      // Handled whichever child is active, and a fallback for events the children ignore.
-      on: { RESET: { actions: [() => console.log("reset")] } },
+      states: { editing: {}, reviewing: {} },
+      on: { RESET: "published" },
     },
     published: {},
   },
-};
-
-const machine = createMachine(definition);
+});
 
 console.log(machine.state); // "draft.editing"
-await machine.send("SUBMIT");
-console.log(machine.state); // "draft.reviewing"
 console.log(machine.matches("draft")); // true: the compound state is active too
-await machine.send("RESET"); // handled by draft, so both levels exit and re-enter
-console.log(machine.state); // "draft.editing"
+await machine.send("RESET"); // bubbles from editing to draft
+console.log(machine.state); // "published"
+
+// @ts-expect-error paths are derived from the states tree
+machine.matches("draft.missing");
 ```
 
 **State paths.** Every state has one: the keys from the top level joined with dots, such as
@@ -430,12 +416,64 @@ declared leaf path and rejects a compound path, because the machine cannot be in
 state without one of its children. `done` is true only when nothing in the active configuration can
 handle an event, so a leaf that declares nothing is not done while its parent still does.
 
-**Typing.** Nested paths cannot be inferred, because TypeScript cannot reverse-map a recursive
-structure, so a nested machine supplies its path union once, through
-`NestedMachineDefinition<Context, Path, Event>` or the fourth type argument of `MachineDefinition`.
-Everything else is derived from it: which states are top level, which children belong to which
-parent, the event union, the accepted target forms, and the narrowing each hook sees. A flat machine
-needs none of this and keeps the inference described in [Type safety](#type-safety).
+**Typing.** `createMachine()` derives all dotted paths recursively from the nested `states` maps.
+The resulting union types `state`, `matches()`, snapshots and the state paths returned by
+`restore()`. `NestedMachineDefinition` remains available for explicitly annotated definitions, but
+ordinary machine declarations do not need a manually maintained path union.
+
+---
+
+## Typed event payloads
+
+Declare payload shapes in the machine's `events` map. A payload-free event maps to `undefined`;
+an event with data maps to its payload object type. The values in this map are only type
+declarations, not runtime validators.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+type CounterEvents = {
+  ADD: { amount: number };
+  RESET: undefined;
+};
+
+const machine = createMachine({
+  id: "counter",
+  initial: "counting",
+  context: { count: 0 },
+  events: {} as CounterEvents,
+  states: {
+    counting: {
+      on: {
+        ADD: {
+          target: "counting",
+          guard: ({ event }) => event.amount > 0,
+          actions: [({ context, event }) => { context.count += event.amount; }],
+        },
+        RESET: { actions: [({ context }) => { context.count = 0; }] },
+      },
+    },
+  },
+});
+
+await machine.send({ type: "ADD", amount: 2 });
+await machine.send("RESET");
+```
+
+`send()` and `can()` accept a payload-free event name as a string, or a typed object of the form
+`{ type: "EVENT_NAME", ...payload }`. The type checker rejects unknown event names, missing
+payload fields and incompatible payload values. Guards, transition actions, entry and exit hooks
+receive the full event for the transition; asynchronous work keeps the event payload available
+until the transition settles.
+
+Snapshots and subscription notifications retain the event object that committed the transition.
+Each snapshot and each listener receives its own clone of the event payload. `getNextEvents()`
+returns event names (the `type` discriminators for payload events), not fabricated event objects,
+because it cannot know the payload values a caller will send.
+
+Event payloads must be structured-cloneable so the engine can isolate them across queued work and
+snapshots. The `events` map declares TypeScript shapes only; untyped runtime callers are checked
+for an event name or an object with a string `type`, not validated against a payload schema.
 
 ---
 
@@ -1538,6 +1576,7 @@ Returns a machine. The definition is validated eagerly: a malformed definition t
 | `id`      | yes      | Non-empty identifier. Echoed in snapshots and error messages.                              |
 | `initial` | yes      | A declared state. The machine starts here.                                                 |
 | `context` | yes      | Plain object; must be structured-cloneable. Deep cloned per machine instance.              |
+| `events`  | no       | Optional type-only map from event names to payload shapes; use `undefined` for payload-free events. |
 | `states`  | yes      | Map of state name to state definition. Every transition target must be a declared state.    |
 
 #### Machine options
@@ -1584,7 +1623,7 @@ console.log(machine.snapshot().schemaVersion); // 2
 | ------- | ----------------------------------------- | ------------------------------------------------------------------ |
 | `entry` | `ActionFn[]` or `readonly ActionFn[]`     | Actions run when the state is entered (after transition actions).   |
 | `exit`  | `ActionFn[]` or `readonly ActionFn[]`     | Actions run when the state is left (before transition actions).     |
-| `on`    | `Partial<Record<EventName, Transition>>`  | Events accepted in this state and what they do.                     |
+| `on`    | `Partial<Record<EventName, Transition>>`  | Events accepted in this state and what they do. Payload events use their `type` name as the key. |
 | `initial` | `string`                                | Key of the child entered when this compound state is entered. Required with `states`, rejected without it. |
 | `states` | `Record<StateName, StateDefinition>`     | Nested states. Present only on a compound state.                    |
 
@@ -1629,7 +1668,7 @@ const action: ActionFn<OrderContext, "pending" | "confirmed", "CONFIRM" | "PROCE
   state,
   event,
 }) => {
-  console.log(`${event} while leaving ${state}, authorised=${context.paymentAuthorized}`);
+  console.log(`${typeof event === "string" ? event : event.type} while leaving ${state}, authorised=${context.paymentAuthorized}`);
 };
 
 export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (action(args), true);
@@ -1653,7 +1692,7 @@ export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (ac
 | `context` | `TContext` | A fresh clone of the committed context. |
 | `send` | `(event: TEvent) => Promise<MachineSnapshot>` | Queues an event. Resolves with the committed snapshot, or rejects with the failure. |
 | `can` | `(event: TEvent) => Promise<boolean>` | Queued check of whether the event would commit. Runs the guard, commits nothing. |
-| `getNextEvents` | `() => TEvent[]` | Events the active configuration declares, shallowest state first. Synchronous, never runs a guard. |
+| `getNextEvents` | `() => EventNameOf<TEvent>[]` | Event names the active configuration declares, shallowest state first. Synchronous, never runs a guard. |
 | `matches` | `(path: TState) => boolean` | True for the active leaf and every state above it; false for an undeclared path. |
 | `subscribe` | `(listener: (snapshot) => void) => () => void` | Called once per committed transition. Returns an unsubscribe function. |
 | `snapshot` | `() => MachineSnapshot` | Immutable snapshot of the committed state, with a cloned context. |
@@ -1717,8 +1756,8 @@ const answer = await machine.can("SHIP");
 Two behaviours are worth knowing before leaning on it:
 
 - An event the committed state does not declare resolves to `false` instead of rejecting, so a
-  dynamic caller can ask about anything. A non-string event still rejects with `InvalidEventError`,
-  and a guard that throws rejects with the original error, exactly as `send()` does.
+  dynamic caller can ask about anything. A malformed event value still rejects with
+  `InvalidEventError`, and a guard that throws rejects with the original error, exactly as `send()` does.
 - `can()` runs guards, so a guard with side effects of its own is observable here too. The machine is
   untouched: only the guard runs, and only against a clone.
 
@@ -1731,10 +1770,10 @@ Because a running check is pending work, `whenIdle()` waits for it.
 | `id`       | `string`            | Machine identifier.                                                             |
 | `state`    | `TState`            | Committed state path, such as `"draft.editing"` for a nested machine.            |
 | `context`  | `TContext`          | Cloned context.                                                                 |
-| `event`    | `TEvent \| null`    | The event that produced this snapshot, or `null` when none did.                 |
+| `event`    | `TEvent \| null`    | The full event value that produced this snapshot, or `null` when none did.      |
 | `previous` | `TState \| null`    | The state path before the transition that produced this snapshot, or `null` when no transition did. |
 | `revision` | `number`            | Committed transitions on this instance. Never restored from storage.             |
-| `done`     | `boolean`           | `true` when the current state declares no outgoing transitions.                  |
+| `done`     | `boolean`           | `true` when no state in the active configuration declares an outgoing transition. |
 | `schemaVersion` | `number`       | Version stamped by the machine, checked by `restore()`.                          |
 
 The snapshots returned by `send()` and delivered to subscribers describe the transition that produced
@@ -1747,8 +1786,8 @@ them, so `event` and `previous` are filled in. Snapshots from `machine.snapshot(
 | Error | Raised when |
 | --- | --- |
 | `StateflowError` | Base class for every library error. |
-| `MachineConfigurationError` | The definition is malformed, or the context cannot be cloned. |
-| `InvalidEventError` | The event is declared nowhere in the machine. |
+| `MachineConfigurationError` | The definition is malformed, or the context/event payload cannot be cloned. |
+| `InvalidEventError` | The event is malformed or declared nowhere in the machine. |
 | `InvalidTransitionError` | The event is declared but not accepted in the current state. |
 | `GuardRejectedError` | A guard returned `false`. |
 | `QueueOverflowError` | A submission arrived while the queue was already at `maxQueueDepth`. |
@@ -2009,16 +2048,17 @@ console.log(state); // "pending"
 
 What the compiler enforces:
 
-- The **state union is the `states` map**: every declared key is a valid state, including a state
-  that no transition targets (an entry-only, planned or unreachable state).
+- The **state union is the complete `states` tree**: every declared path is valid, including a
+  state that no transition targets (an entry-only, planned or unreachable state).
 - Unknown event names are rejected at the call site.
+- The `events` map declares payload shapes. Payload-free events accept string shorthand; payload
+  events require `{ type, ...payload }` with the declared fields.
 - `initial` and every transition target (shorthand and object form) must be a declared state.
 - Guards, actions and hooks receive the typed context, plus the state and event they are narrowed
   to (see [Per-state narrowing](#per-state-narrowing)). For a nested machine the narrowed state is
   the full path, such as `"draft.editing"`.
-- The state union is the declared state paths, so `machine.state` and `matches(path)` accept exactly
-  the paths the definition declares. A nested machine supplies that union itself, as described in
-  [Nested states](#nested-states).
+- The state union is the declared state paths, so `machine.state`, `matches(path)`, snapshots and
+  `restore()` results use paths derived recursively from the definition.
 - The context type flows into guards, actions, hooks, snapshots and subscribers.
 
 ### Per-state narrowing
@@ -2028,10 +2068,10 @@ that the runtime could never take:
 
 - `state` is the state that declares the hook, guard or action. A guard written in `confirmed` sees
   `"confirmed"`, so comparing it against `"pending"` is a compile error.
-- `event` is the event the transition is declared under. A guard under `CONFIRM` sees `"CONFIRM"`,
-  so it cannot be written to react to an event its own state does not declare.
-- Entry and exit hooks keep the machine-wide event union, because more than one transition can lead
-  into a state, while their `state` is still the state that declares them.
+- `event` is the full event value for the transition. A guard under `CONFIRM` sees `"CONFIRM"` for
+  a payload-free event, or the typed `{ type: "CONFIRM", ...payload }` object when it has payloads.
+- Entry and exit hooks receive the machine-wide event union, because more than one transition can
+  lead into a state, while their `state` is still the state that declares them.
 
 ```ts
 import { createMachine } from "motivo-stateflow";
@@ -2156,8 +2196,7 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 
 | Constraint | Detail |
 | --- | --- |
-| Compound states only | Nested states work; parallel regions and history are still to come. |
-| No event payloads | Events are plain strings; payload data travels in the context. |
+| Compound states only | Flat and compound/nested states are supported; parallel regions and history are not implemented. |
 | No delayed transitions or timers | There is no `after`/`delay` support and no clock injection. Schedule externally and `send()` when the time comes. |
 | No actor composition | One machine per process object; invoking child machines is on the roadmap. |
 | No durable execution | Snapshots can be persisted and restored, but there is no checkpointing, lease/ownership, or recovery loop. |
@@ -2173,8 +2212,7 @@ Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantic
 
 1. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, richer error
    taxonomy, inspection records.
-2. **Advanced states** - parallel states, history, internal/raised/delayed events, typed event
-   payloads.
+2. **Advanced states** - parallel states, history, internal/raised/delayed events.
 3. **Actors and composition** - spawned child machines, message routing, supervision.
 4. **Workflow layer** - multi-machine sagas with compensation and human tasks.
 5. **Durable execution** - stores, checkpointing, recovery, migrations.
@@ -2211,8 +2249,9 @@ The suite is organised into focused files:
 | `tests/isolation.test.ts`     | Instance isolation, nested context, unusual identifiers, resilience.       |
 | `tests/regressions.test.ts`   | Defects reported against earlier revisions.                               |
 | `tests/runtime-fallbacks.test.ts` | The JSON clone fallback and error rendering when value conversion throws. |
+| `tests/events.test.ts`       | Typed payload propagation through guards, actions, hooks, async work and snapshots. |
 | `tests/properties.test.ts`    | fast-check invariants over generated event sequences.                      |
-| `tests/types.test-d.ts`       | Compile-time inference and rejection tests.                                |
+| `tests/types.test-d.ts`       | Compile-time inference, payload validation and nested path rejection tests. |
 
 Property tests assert invariants such as "the state is always declared", "rejected transitions never
 commit", "the same sequence produces the same result", "instances stay isolated", "failed events do
@@ -2240,10 +2279,9 @@ explicit promises rather than sleeps.
 ## Publishing
 
 1. `pnpm check` must pass.
-2. Confirm the name is still available: `npm view motivo-stateflow` (404 means available).
-3. `pnpm build`, then publish with the `files` allow-list already configured:
+2. `pnpm build`, then publish with the `files` allow-list already configured:
    `npm publish --access public`.
-4. Tag the release in the `motivo-stateflow` repository and add release notes.
+3. Tag the release in the `motivo-stateflow` repository and add release notes.
 
 ## License
 

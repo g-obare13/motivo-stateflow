@@ -1,30 +1,28 @@
 # Motivo Stateflow
 
-State machines, workflows and reliable execution for TypeScript.
+Typed state machines for TypeScript.
 
-Motivo Stateflow is built as layers around a dependency-free machine engine: the engine decides
-where a machine may move next, and everything else (durable workflows, actors, tooling) is added on
-top of it without turning the engine into a framework.
+The current workspace contains a dependency-free machine engine. Workflow orchestration, actors,
+persistence and tooling are planned, not implemented.
 
 ## Status
 
 | Capability | Package | Status |
 | --- | --- | --- |
-| Machine Engine: hierarchical and parallel states, guards, transitions, history | `motivo-stateflow` ([packages/core](packages/core)) | In progress. Compound states, guards, hooks, snapshots, validated restoration, per-state type narrowing and inspection helpers are implemented. Parallel states and history are next. |
+| Machine Engine: flat and compound/nested states, guards, transitions | `motivo-stateflow` ([packages/core](packages/core)) | Implemented: compound-state bubbling, typed payload events, hooks, snapshots, validated restoration, subscriptions and inspection. Parallel and history states are not implemented. |
 | Workflow Runtime: long-running workflows, timers, retries, recovery, cancellation | `@motivo/workflow` | Planned. Design is pinned by the durability decision below. |
 | Durability: persistence, checkpoints, event logs, replay, crash recovery | `@motivo/persistence` and adapters (`@motivo/persistence-sqlite`, `@motivo/persistence-postgres`) | Planned. v1 targets recovery after a process restart or crash, with in-memory and SQLite adapters. |
-| Observability: execution traces, transition history, metrics, inspection | `@motivo/devtools` | Planned. |
+| Observability: execution traces, transition history, metrics | `@motivo/devtools` | Planned. Core inspection with `can()` and `getNextEvents()` is implemented. |
 | Actors and Messaging: independent machine instances, mailboxes, routing, supervision | `@motivo/actors` | Planned. |
 | Ecosystem: adapters, CLI, visualization, testing utilities, framework bindings | `@motivo/cli`, `@motivo/testing`, `@motivo/react` | Planned. |
 
-Nothing is published to npm yet. The engine package is versioned `0.1.0` and its npm name was
-verified as available before publication.
+The engine package is currently versioned `0.1.0`.
 
 ## What works today
 
-- Declarative machines with inferred state, event and context types. The state union follows the
-  `states` map, `initial` and every transition target are checked against it, and unknown events are
-  compile errors.
+- Declarative machines with inferred state, event and context types. Dotted state paths are derived
+  recursively from nested `states` maps. `initial`, transition targets, event names and event
+  payloads are checked at compile time.
 - Per-state narrowing: a guard, action or hook sees the state that declares it and the event it
   belongs to, so a reach the runtime could never take is a compile error rather than a silent
   comparison against the wrong union.
@@ -32,6 +30,8 @@ verified as available before publication.
   nearest state that declares them, exit and entry hooks run deepest-first and shallowest-first
   across levels, `machine.state` reports the active leaf as a dotted path, and `matches(path)`
   answers for the leaf and every state containing it.
+- Payload events use `{ type: "NAME", ...payload }`; payload-free events retain the string
+  shorthand. Guards, actions, hooks, snapshots and subscriptions receive the complete event.
 - Guards (sync or async), transition actions, and entry and exit hooks, with atomic commits: a
   failure anywhere in a transition changes nothing.
 - Deterministic processing. Events are queued per machine and processed in submission order, so
@@ -41,9 +41,8 @@ verified as available before publication.
   optional `parseContext` validator for contexts that JSON cannot represent.
 - Inspection without side effects: `getNextEvents()` lists what the committed state accepts, and
   `can(event)` reports whether a transition would commit while committing nothing.
-- 198 runtime tests and 25 compile-time tests, including property-based invariants, coverage
-  thresholds over the engine source, and consumer verification across TypeScript 5.4, 5.9 and 7.0.
-  CI runs on Linux and Windows on Node 22, 24 and 26.
+- 228 runtime tests and 27 compile-time tests, including property-based invariants. The consumer
+  verification script targets TypeScript 5.4, 5.9 and the latest release.
 
 Full API guide, examples and semantics: [packages/core/README.md](packages/core/README.md).
 
@@ -77,7 +76,7 @@ pnpm test:consumer      # install the packed tarball into a throwaway project pe
 ```
 
 Node.js 22 or newer and pnpm 10 are required. TypeScript 5.4 or newer is required to consume the
-published types, and `pnpm test:consumer` proves that floor against the packed artifact.
+published types; `pnpm test:consumer` checks the packed artifact against that floor.
 
 ## Roadmap
 
