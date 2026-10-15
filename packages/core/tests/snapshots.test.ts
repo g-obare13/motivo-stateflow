@@ -142,32 +142,66 @@ describe("restoration", () => {
     expect(restored.revision).toBe(1);
   });
 
-  const invalid: Array<{ name: string; snapshot: unknown }> = [
-    { name: "null", snapshot: null },
-    { name: "undefined", snapshot: undefined },
-    { name: "a string", snapshot: "order" },
-    { name: "a number", snapshot: 7 },
-    { name: "an array", snapshot: [] },
-    { name: "a missing id", snapshot: { state: "confirmed", context: {} } },
-    { name: "a mismatched id", snapshot: { id: "other", state: "confirmed", context: {} } },
-    { name: "a missing state", snapshot: { id: "order", context: {} } },
-    { name: "an undeclared state", snapshot: { id: "order", state: "ghost", context: {} } },
+  /** Each rejection reports what is wrong with the snapshot, not just that something is. */
+  const invalid: Array<{ name: string; snapshot: unknown; message: RegExp }> = [
+    { name: "null", snapshot: null, message: /Snapshot must be a plain object/ },
+    { name: "undefined", snapshot: undefined, message: /Snapshot must be a plain object/ },
+    { name: "a string", snapshot: "order", message: /Snapshot must be a plain object/ },
+    { name: "a number", snapshot: 7, message: /Snapshot must be a plain object/ },
+    { name: "an array", snapshot: [], message: /Snapshot must be a plain object/ },
+    {
+      name: "a missing id",
+      snapshot: { state: "confirmed", context: {} },
+      message: /Snapshot id undefined does not match machine id "order"/,
+    },
+    {
+      name: "a mismatched id",
+      snapshot: { id: "other", state: "confirmed", context: {} },
+      message: /Snapshot id "other" does not match machine id "order"/,
+    },
+    {
+      name: "a missing state",
+      snapshot: { id: "order", context: {} },
+      // Without a `state` or a `configuration` there is nothing to activate, so the derived
+      // configuration is the first thing that fails.
+      message: /Snapshot configuration for machine "order" must name at least one active state/,
+    },
+    {
+      name: "an undeclared state",
+      snapshot: { id: "order", state: "ghost", context: {} },
+      message: /Snapshot state "ghost" is not declared/,
+    },
     {
       name: "a prototype state name",
       snapshot: { id: "order", state: "toString", context: {} },
+      message: /Snapshot state "toString" is not declared/,
     },
-    { name: "a missing context", snapshot: { id: "order", state: "confirmed" } },
-    { name: "a null context", snapshot: { id: "order", state: "confirmed", context: null } },
-    { name: "a primitive context", snapshot: { id: "order", state: "confirmed", context: 7 } },
+    {
+      name: "a missing context",
+      snapshot: { id: "order", state: "confirmed" },
+      message: /Snapshot context for machine "order" must be a plain object/,
+    },
+    {
+      name: "a null context",
+      snapshot: { id: "order", state: "confirmed", context: null },
+      message: /Snapshot context for machine "order" must be a plain object/,
+    },
+    {
+      name: "a primitive context",
+      snapshot: { id: "order", state: "confirmed", context: 7 },
+      message: /Snapshot context for machine "order" must be a plain object/,
+    },
     {
       name: "an unclonable context",
       snapshot: { id: "order", state: "confirmed", context: { run: () => 1 } },
+      message: /Snapshot context for machine "order" must be structured-cloneable/,
     },
   ];
 
-  it.each(invalid)("rejects $name", async ({ snapshot }) => {
+  it.each(invalid)("rejects $name", async ({ snapshot, message, name }) => {
     const machine = orderMachine();
-    await expect(machine.restore(snapshot)).rejects.toBeInstanceOf(SnapshotValidationError);
+    await expect(machine.restore(snapshot), name).rejects.toBeInstanceOf(SnapshotValidationError);
+    await expect(machine.restore(snapshot), name).rejects.toThrow(message);
   });
 
   it("leaves the machine untouched when a snapshot is rejected", async () => {
@@ -277,30 +311,28 @@ describe("snapshot schema version", () => {
       states: { pending: {} },
     };
 
-    expect(() => createLooseMachine(definition, { schemaVersion: -1 })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { schemaVersion: 1.5 })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { schemaVersion: "1" as never })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { parseContext: "nope" as never })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { maxQueueDepth: 0 })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { maxQueueDepth: -1 })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { maxQueueDepth: 2.5 })).toThrow(
-      MachineConfigurationError,
-    );
-    expect(() => createLooseMachine(definition, { maxQueueDepth: "2" as never })).toThrow(
-      MachineConfigurationError,
-    );
+    // Each rejection names the option and the shape it needs, so a check that stops firing is
+    // caught by its message rather than only by the class every option shares.
+    const rejected: Array<[Record<string, unknown>, RegExp]> = [
+      [{ schemaVersion: -1 }, /option "schemaVersion" must be a non-negative integer/],
+      [{ schemaVersion: 1.5 }, /option "schemaVersion" must be a non-negative integer/],
+      [{ schemaVersion: "1" }, /option "schemaVersion" must be a non-negative integer/],
+      [{ parseContext: "nope" }, /option "parseContext" must be a function/],
+      [{ maxQueueDepth: 0 }, /option "maxQueueDepth" must be a positive integer/],
+      [{ maxQueueDepth: -1 }, /option "maxQueueDepth" must be a positive integer/],
+      [{ maxQueueDepth: 2.5 }, /option "maxQueueDepth" must be a positive integer/],
+      [{ maxQueueDepth: "2" }, /option "maxQueueDepth" must be a positive integer/],
+    ];
+
+    for (const [options, message] of rejected) {
+      expect(() => createLooseMachine(definition, options as never), JSON.stringify(options)).toThrow(
+        MachineConfigurationError,
+      );
+      expect(() => createLooseMachine(definition, options as never), JSON.stringify(options)).toThrow(
+        message,
+      );
+    }
+
     expect(() => createLooseMachine(definition, { schemaVersion: 3 })).not.toThrow();
     expect(() => createLooseMachine(definition, { maxQueueDepth: 1 })).not.toThrow();
   });

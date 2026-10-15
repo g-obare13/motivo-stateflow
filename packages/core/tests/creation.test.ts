@@ -15,6 +15,8 @@ import {
   SnapshotValidationError,
   StateflowError,
   SUPPORTED_SNAPSHOT_VERSIONS,
+  UNSUPPORTED_DEFINITION_KEY_CODE,
+  UnsupportedDefinitionKeyError,
   UnsupportedSnapshotVersionError,
   UnsupportedTransitionTypeError,
   UNSUPPORTED_SNAPSHOT_VERSION_CODE,
@@ -88,7 +90,12 @@ describe("createMachine", () => {
 });
 
 describe("definition validation", () => {
-  const cases: Array<{ name: string; definition: unknown; error: new (message: string) => Error }> = [
+  const cases: Array<{
+    name: string;
+    definition: unknown;
+    /** The error class the definition must raise; never constructed by the test itself. */
+    error: abstract new (...args: never[]) => Error;
+  }> = [
     {
       name: "missing id",
       definition: { initial: "a", context: {}, states: { a: {} } },
@@ -170,6 +177,11 @@ describe("definition validation", () => {
       error: MachineConfigurationError,
     },
     {
+      name: "target value that is not a state name",
+      definition: { id: "m", initial: "a", context: {}, states: { a: { on: { GO: { target: 7 } } } } },
+      error: MachineConfigurationError,
+    },
+    {
       name: "guard that is not a function",
       definition: {
         id: "m",
@@ -209,11 +221,113 @@ describe("definition validation", () => {
       definition: { id: "m", initial: "a", context: {}, states: { a: { on: { GO: 3 } } } },
       error: MachineConfigurationError,
     },
+    {
+      name: "compound state without a declared initial child",
+      definition: {
+        id: "m",
+        initial: "a",
+        context: {},
+        states: { a: { initial: "ghost", states: { b: {} } } },
+      },
+      error: MachineConfigurationError,
+    },
+    {
+      name: "top-level on",
+      definition: { id: "m", initial: "a", context: {}, on: { GO: "a" }, states: { a: {} } },
+      error: UnsupportedDefinitionKeyError,
+    },
   ];
 
-  it.each(cases)("rejects $name", ({ definition, error }) => {
-    expect(() => createLooseMachine(definition)).toThrow(error);
-    expect(() => createLooseMachine(definition)).toThrow(MachineConfigurationError);
+  /** Runs a definition the compiler rejects and returns the error it raised. */
+  const caught = (definition: unknown): unknown => {
+    try {
+      createLooseMachine(definition);
+    } catch (error) {
+      return error;
+    }
+    throw new Error("expected the definition to be refused");
+  };
+
+  it.each(cases)("rejects $name", ({ definition, error, name }) => {
+    expect(caught(definition), name).toBeInstanceOf(error);
+    expect(caught(definition), name).toBeInstanceOf(MachineConfigurationError);
+  });
+
+  /**
+   * The message fragment each rejected definition must produce.
+   *
+   * Asserting the error class alone lets an individual validation stop firing unnoticed, because a
+   * later check usually raises the same class; the fragment pins the check that has to reject it.
+   */
+  const messages: Record<string, RegExp> = {
+    "missing id": /non-empty string "id"/,
+    "blank id": /non-empty string "id"/,
+    "missing states": /must declare a "states" object/,
+    "empty states": /must declare at least one state/,
+    "states that are not an object": /must declare a "states" object/,
+    "state definition that is not an object": /must be a plain object/,
+    "context that is not an object": /context must be a plain object/,
+    "context that cannot be cloned": /must be structured-cloneable/,
+    "initial state that is not declared": /initial state "missing" is not declared/,
+    "initial state that is a prototype member": /initial state "toString" is not declared/,
+    "string target that is not declared": /targets undeclared state "nope"/,
+    "object target that is not declared": /targets undeclared state "nope"/,
+    "target that is a prototype member": /targets undeclared state "hasOwnProperty"/,
+    "non-string target": /must be a state name or a transition object/,
+    "target value that is not a state name": /targets 7, which is not a state name/,
+    "guard that is not a function": /has an invalid "guard"/,
+    "actions that are not functions": /has an invalid "actions"/,
+    "entry hooks that are not an array": /has an invalid "entry" hook/,
+    "exit hooks that contain a non-function": /has an invalid "exit" hook/,
+    "on map that is not an object": /has an invalid "on" map/,
+    "transition that is neither a string nor an object": /must be a state name or a transition object/,
+    "compound state without a declared initial child": /must declare an "initial" child state/,
+    "top-level on": /transitions belong to states/,
+  };
+
+  it.each(cases)("rejects $name for the reason it reports", ({ definition, name }) => {
+    const message = messages[name];
+    expect(message, `a message fragment declared for "${name}"`).toBeDefined();
+    expect(() => createLooseMachine(definition), name).toThrow(message as RegExp);
+  });
+
+  it("declares a message fragment for every rejected definition", () => {
+    expect(Object.keys(messages).sort()).toEqual(cases.map((entry) => entry.name).sort());
+  });
+
+  it("rejects a top-level on with a stable code and the offending key", () => {
+    const failure = (() => {
+      try {
+        createLooseMachine({
+          id: "top-level-on",
+          initial: "a",
+          context: {},
+          on: { GO: "a" },
+          states: { a: {} },
+        });
+        return undefined;
+      } catch (error) {
+        return error as UnsupportedDefinitionKeyError;
+      }
+    })();
+
+    expect(failure).toBeInstanceOf(UnsupportedDefinitionKeyError);
+    expect(failure).toBeInstanceOf(MachineConfigurationError);
+    expect(failure?.code).toBe(UNSUPPORTED_DEFINITION_KEY_CODE);
+    expect(failure?.code).toBe("ERR_UNSUPPORTED_DEFINITION_KEY");
+    expect(failure?.key).toBe("on");
+
+    // The field has to be absent, not merely falsy: `on: undefined` is what an optional field
+    // evaluates to when a caller spreads a definition together.
+    expect(() =>
+      createLooseMachine({
+        id: "no-on",
+        initial: "a",
+        context: {},
+        on: undefined,
+        states: { a: {} },
+      }),
+    ).not.toThrow();
   });
 
   it("reports the offending target in the message", () => {

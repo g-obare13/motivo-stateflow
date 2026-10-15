@@ -744,3 +744,21 @@ test("TY4: rejects state declarations whose kind and fields disagree", () => {
   // @ts-expect-error internal transitions are not supported in this version
   createMachine({ id: "x", initial: "a", context: {}, states: { a: { on: { GO: { target: "b", type: "internal" } } }, b: {} } });
 });
+
+test("TY5: rejects a transition map on the machine itself", () => {
+  // @ts-expect-error a machine declares no transitions of its own
+  createMachine({ id: "x", initial: "a", context: {}, on: { GO: "a" }, states: { a: {} } });
+
+  // The field is declared as `never`, so a definition held in a variable is rejected too, where no
+  // excess property check would otherwise apply.
+  const withTopLevelOn = {
+    id: "x",
+    initial: "a",
+    context: {},
+    on: { GO: "a" },
+    states: { a: {} },
+  };
+
+  // @ts-expect-error a machine declares no transitions of its own
+  createMachine(withTopLevelOn);
+});

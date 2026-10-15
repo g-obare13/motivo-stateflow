@@ -400,6 +400,12 @@ export type MachineDefinition<
    */
   events?: TPayloads;
   /**
+   * Reserved: a machine declares no transitions of its own, so a top-level `on` map is rejected by
+   * `createMachine()` with `UnsupportedDefinitionKeyError`. Declare transitions on the states that
+   * react instead, which is also where `state` and `event` are narrowed for guards and hooks.
+   */
+  on?: never;
+  /**
    * Declared states. Every transition target must be a key of this object.
    *
    * The mapped form feeds each key into its own state definition, which is what narrows the

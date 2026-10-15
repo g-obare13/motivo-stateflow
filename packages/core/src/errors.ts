@@ -57,6 +57,9 @@ export class MachineConfigurationError extends StateflowError {
   }
 }
 
+/** Stable machine-readable code reported by {@link UnsupportedTransitionTypeError}. */
+export const UNSUPPORTED_TRANSITION_TYPE_CODE = "ERR_UNSUPPORTED_TRANSITION_TYPE";
+
 /**
  * Thrown by `createMachine()` when a transition declares a `type` field.
  *
@@ -80,6 +83,8 @@ export class MachineConfigurationError extends StateflowError {
  * ```
  */
 export class UnsupportedTransitionTypeError extends MachineConfigurationError {
+  /** Stable code for programmatic handling, independent of the message wording. */
+  readonly code: string = UNSUPPORTED_TRANSITION_TYPE_CODE;
   /** The rejected `type` value, or `undefined` when the field was present but not a string. */
   readonly receivedType: string | undefined;
 
@@ -92,6 +97,47 @@ export class UnsupportedTransitionTypeError extends MachineConfigurationError {
     super(message, options);
     this.name = "UnsupportedTransitionTypeError";
     this.receivedType = receivedType;
+  }
+}
+
+/** Stable machine-readable code reported by {@link UnsupportedDefinitionKeyError}. */
+export const UNSUPPORTED_DEFINITION_KEY_CODE = "ERR_UNSUPPORTED_DEFINITION_KEY";
+
+/**
+ * Thrown by `createMachine()` when a machine definition declares a top-level `on` map.
+ *
+ * Transitions belong to states: a state's `on` map is what makes the machine react, and the
+ * machine itself has no state to transition from. The field used to be ignored, which turned a
+ * misplaced handler into a machine that silently never reacted to its event. Extends
+ * {@link MachineConfigurationError}, so existing configuration-error handling still catches it.
+ *
+ * @example
+ * ```ts
+ * createMachine({
+ *   id: "order",
+ *   initial: "pending",
+ *   context: {},
+ *   on: { CANCEL: "cancelled" }, // rejected: declare it on a state instead
+ *   states: { pending: { on: { CANCEL: "cancelled" } }, cancelled: {} },
+ * });
+ * // throws UnsupportedDefinitionKeyError
+ * ```
+ */
+export class UnsupportedDefinitionKeyError extends MachineConfigurationError {
+  /** Stable code for programmatic handling, independent of the message wording. */
+  readonly code: string = UNSUPPORTED_DEFINITION_KEY_CODE;
+  /** The rejected key, so a caller knows which field to remove from the definition. */
+  readonly key: string;
+
+  /**
+   * @param message - Human readable description of the unsupported declaration.
+   * @param key - The rejected top-level key.
+   * @param options - Standard error options; `cause` carries the underlying failure.
+   */
+  constructor(message: string, key: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "UnsupportedDefinitionKeyError";
+    this.key = key;
   }
 }
 

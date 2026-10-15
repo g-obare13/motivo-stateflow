@@ -726,13 +726,30 @@ describe("definition validation", () => {
       states: { a: { on: { GO: { target: "b", type: "internal" } } }, b: {} },
     };
 
-    expect(compile(internal)).toThrow(UnsupportedTransitionTypeError);
-    expect(compile(internal)).toThrow(/internal transitions are not supported in this version/);
-    // Still a configuration error, so existing configuration handling keeps catching it.
-    expect(compile(internal)).toThrow(MachineConfigurationError);
+    const caught = (definition: unknown): UnsupportedTransitionTypeError => {
+      try {
+        compile(definition)();
+      } catch (error) {
+        return error as UnsupportedTransitionTypeError;
+      }
+      throw new Error("expected the definition to be refused");
+    };
+
+    const failure = caught(internal);
+
+    expect(failure).toBeInstanceOf(UnsupportedTransitionTypeError);
+    expect(failure).toBeInstanceOf(MachineConfigurationError);
+    expect(failure.message).toMatch(/internal transitions are not supported in this version/);
+    // The rejected value is reported, so a caller can tell which field to remove.
+    expect(failure.receivedType).toBe("internal");
+
+    // A non-string `type` is still refused, and reports no name rather than a coerced one.
     expect(
-      compile({ ...internal, states: { a: { on: { GO: { target: "b", type: 42 } } }, b: {} } }),
-    ).toThrow(UnsupportedTransitionTypeError);
+      caught({
+        ...internal,
+        states: { a: { on: { GO: { target: "b", type: 42 } } }, b: {} },
+      }).receivedType,
+    ).toBeUndefined();
   });
 });
 

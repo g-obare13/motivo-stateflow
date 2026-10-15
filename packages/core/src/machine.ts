@@ -16,6 +16,7 @@ import {
   QueueOverflowError,
   SnapshotValidationError,
   SUPPORTED_SNAPSHOT_VERSIONS,
+  UnsupportedDefinitionKeyError,
   UnsupportedSnapshotVersionError,
   UnsupportedTransitionTypeError,
 } from "./errors.js";
@@ -432,6 +433,7 @@ export function createMachine<TContext extends object>(
 ): unknown {
   const raw = definition as unknown as {
     id?: unknown;
+    on?: unknown;
     initial?: unknown;
     context?: unknown;
     states?: unknown;
@@ -440,6 +442,16 @@ export function createMachine<TContext extends object>(
 
   if (machineId.trim() === "") {
     throw new MachineConfigurationError('Machine definitions require a non-empty string "id".');
+  }
+
+  // Transitions belong to states, so a machine-level map is a misplaced handler rather than a
+  // feature. It is rejected instead of ignored: a definition that reads as if it reacts would
+  // otherwise produce a machine that never does.
+  if (raw.on !== undefined) {
+    throw new UnsupportedDefinitionKeyError(
+      `Machine "${machineId}" declares a top-level "on" map, but transitions belong to states: declare them on the state that should react. A machine has no state of its own to transition from.`,
+      "on",
+    );
   }
 
   const rawStates = assertPlainObject(
