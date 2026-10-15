@@ -236,6 +236,22 @@ describe("definition validation", () => {
       definition: { id: "m", initial: "a", context: {}, on: { GO: "a" }, states: { a: {} } },
       error: UnsupportedDefinitionKeyError,
     },
+    {
+      // A number that happens to be a key: the guard has to reject it by type, not only by lookup.
+      name: "initial state that is not a string but is a key",
+      definition: { id: "m", initial: 7, context: {}, states: { "7": {} } },
+      error: MachineConfigurationError,
+    },
+    {
+      name: "compound initial that is not a string but is a key",
+      definition: {
+        id: "m",
+        initial: "a",
+        context: {},
+        states: { a: { initial: 7, states: { "7": {} } } },
+      },
+      error: MachineConfigurationError,
+    },
   ];
 
   /** Runs a definition the compiler rejects and returns the error it raised. */
@@ -283,6 +299,8 @@ describe("definition validation", () => {
     "transition that is neither a string nor an object": /must be a state name or a transition object/,
     "compound state without a declared initial child": /must declare an "initial" child state/,
     "top-level on": /transitions belong to states/,
+    "initial state that is not a string but is a key": /initial state 7 is not declared/,
+    "compound initial that is not a string but is a key": /must declare an "initial" child state, but 7 is not one of its states/,
   };
 
   it.each(cases)("rejects $name for the reason it reports", ({ definition, name }) => {
@@ -368,6 +386,7 @@ describe("definition validation", () => {
         new UnsupportedSnapshotVersionError("message", 9, SUPPORTED_SNAPSHOT_VERSIONS),
         "UnsupportedSnapshotVersionError",
       ],
+      [new UnsupportedDefinitionKeyError("message", "on"), "UnsupportedDefinitionKeyError"],
     ];
 
     for (const [error, name] of errors) {

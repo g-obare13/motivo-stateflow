@@ -12,6 +12,7 @@ import {
   InvalidEventError,
   InvalidTransitionError,
   MachineConfigurationError,
+  UNSUPPORTED_TRANSITION_TYPE_CODE,
   UnsupportedTransitionTypeError,
 } from "../src/index.js";
 
@@ -742,6 +743,8 @@ describe("definition validation", () => {
     expect(failure.message).toMatch(/internal transitions are not supported in this version/);
     // The rejected value is reported, so a caller can tell which field to remove.
     expect(failure.receivedType).toBe("internal");
+    expect(failure.code).toBe(UNSUPPORTED_TRANSITION_TYPE_CODE);
+    expect(failure.code).toBe("ERR_UNSUPPORTED_TRANSITION_TYPE");
 
     // A non-string `type` is still refused, and reports no name rather than a coerced one.
     expect(

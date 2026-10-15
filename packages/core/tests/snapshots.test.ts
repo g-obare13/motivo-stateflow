@@ -335,6 +335,9 @@ describe("snapshot schema version", () => {
 
     expect(() => createLooseMachine(definition, { schemaVersion: 3 })).not.toThrow();
     expect(() => createLooseMachine(definition, { maxQueueDepth: 1 })).not.toThrow();
+    // Zero is a non-negative integer, so it is accepted and stamped into snapshots.
+    expect(() => createLooseMachine(definition, { schemaVersion: 0 })).not.toThrow();
+    expect(createLooseMachine(definition, { schemaVersion: 0 }).snapshot().schemaVersion).toBe(0);
   });
 });
 
