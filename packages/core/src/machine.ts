@@ -19,6 +19,7 @@ import {
   UnsupportedSnapshotVersionError,
   UnsupportedTransitionTypeError,
 } from "./errors.js";
+import { intersects, isDescendantOf, leastCommonCompoundAncestor } from "./graph.js";
 import type {
   ActionFn,
   EventFromName,
@@ -587,45 +588,6 @@ export function createMachine<TContext extends object>(
 
   applyConfiguration(activeLeaves);
 
-  /** True when `node` sits strictly below `ancestor`. */
-  const isDescendantOf = (
-    node: CompiledState<TContext>,
-    ancestor: CompiledState<TContext>,
-  ): boolean => {
-    for (let current = node.parent; ; current = current.parent) {
-      if (current === ancestor) {
-        return true;
-      }
-      if (current === root) {
-        return false;
-      }
-    }
-  };
-
-  /**
-   * The least common compound ancestor of `states`: the nearest ancestor of all of them that is
-   * compound, or the virtual root.
-   *
-   * Parallel states are skipped, which is SCXML's definition of the transition domain. It is why a
-   * transition declared on a region of a parallel state, including a self-transition, exits and
-   * re-enters the whole parallel subtree: the domain has to be a compound state above the parallel
-   * state, so the parallel state is one of the proper descendants it exits.
-   */
-  const leastCommonCompoundAncestor = (
-    states: Array<CompiledState<TContext>>,
-  ): CompiledState<TContext> => {
-    const first = states[0] ?? root;
-    let ancestor = first === root ? root : first.parent;
-    while (
-      ancestor !== root &&
-      (ancestor.kind !== "compound" ||
-        !states.every((state) => isDescendantOf(state, ancestor)))
-    ) {
-      ancestor = ancestor.parent;
-    }
-    return ancestor;
-  };
-
   /**
    * The active states one candidate exits: the proper descendants of its domain, or nothing at all
    * for a targetless transition, which has no domain to compute because it has no target.
@@ -638,7 +600,7 @@ export function createMachine<TContext extends object>(
     if (targets.length === 0) {
       return exiting;
     }
-    const domain = leastCommonCompoundAncestor([source, ...targets]);
+    const domain = leastCommonCompoundAncestor([source, ...targets], root);
     for (const state of activeStates) {
       if (isDescendantOf(state, domain)) {
         exiting.add(state);
@@ -1451,17 +1413,6 @@ const describeConfiguration = <TContext>(leaves: Array<CompiledState<TContext>>)
     return `state ${describe(only.path)}`;
   }
   return `configuration [${leaves.map((leaf) => describe(leaf.path)).join(", ")}]`;
-};
-
-/** True when two sets share at least one member. Iterates the smaller set. */
-const intersects = <T>(left: Set<T>, right: Set<T>): boolean => {
-  const [smaller, larger] = left.size <= right.size ? [left, right] : [right, left];
-  for (const value of smaller) {
-    if (larger.has(value)) {
-      return true;
-    }
-  }
-  return false;
 };
 
 /**
