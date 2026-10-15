@@ -20,13 +20,16 @@ export default {
   // Stryker's own plugin discovery cannot reach a sibling package on its own.
   plugins: ["@stryker-mutator/vitest-runner"],
   vitest: { configFile: "vitest.stryker.config.ts" },
-  mutate: ["src/machine.ts", "src/errors.ts"],
+  mutate: ["src/machine.ts", "src/errors.ts", "src/graph.ts"],
   coverageAnalysis: "perTest",
   concurrency: 4,
   timeoutMS: 20000,
   reporters: ["clear-text", "json"],
   jsonReporter: { fileName: "reports/mutation/mutation.json" },
-  thresholds: { high: 90, low: 80, break: null },
+  // The gate is lower than the current score on purpose: it fails a run that has lost real
+  // coverage of the engine's behaviour, without failing on the wording of a message or a
+  // defensive default that no definition can reach.
+  thresholds: { high: 90, low: 80, break: 85 },
   tempDirName: ".stryker-tmp",
   cleanTempDir: true,
   ignoreStatic: false,

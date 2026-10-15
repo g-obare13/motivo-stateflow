@@ -1,0 +1,45 @@
+# Mutation testing for the Motivo Stateflow engine.
+#
+# Mutation testing answers what coverage cannot: whether the suite would notice if the engine were
+# wrong. A full run takes about fifteen minutes, so it does not gate pull requests; it runs nightly
+# and on demand instead. `thresholds.break` is 85, so a run that drops below that fails the job and
+# the mutation report is uploaded either way.
+name: Mutation testing
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC, off the hour so it does not queue behind other scheduled work.
+    - cron: "17 3 * * *"
+
+jobs:
+  stryker:
+    name: Stryker on Node 22
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Fails when the mutation score drops below the configured `thresholds.break` of 85.
+      - name: Mutation testing
+        run: pnpm --filter motivo-stateflow run test:mutation
+
+      - name: Upload the mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: packages/core/reports/mutation
+          if-no-files-found: warn
