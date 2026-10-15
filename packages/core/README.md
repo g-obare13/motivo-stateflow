@@ -29,6 +29,9 @@ import { createMachine } from "motivo-stateflow";
 - [Five-minute tutorial](#five-minute-tutorial)
 - [Core concepts](#core-concepts)
 - [Nested states](#nested-states)
+- [Parallel states](#parallel-states)
+- [History states](#history-states)
+- [Targetless transitions](#targetless-transitions)
 - [Typed event payloads](#typed-event-payloads)
 - [Examples](#examples)
   - [1. Guarded transition with async work](#1-guarded-transition-with-async-work)
@@ -345,7 +348,7 @@ That is the whole core surface. Everything below goes deeper into patterns, use 
 | **Definition** | The declarative object passed to `createMachine`: `id`, `initial`, `context`, `states`. Validated eagerly; a malformed definition throws `MachineConfigurationError`. |
 | **State** | A named phase of the process (`pending`, `shipped`, ...). Lives in `states`; `initial` selects the starting one. A state that declares `states` is compound and contains child states. |
 | **Event** | A named occurrence (`CONFIRM`, `SHIP`, ...). Sent with `send()`; declared per state in that state's `on` map. |
-| **Transition** | What an event does in a state: either a target state name, or an object with `target`, `guard` and `actions`. Omitting `target` means a self-transition. |
+| **Transition** | What an event does in a state: either a target state name, or an object with `target`, `guard` and `actions`. Omitting `target` runs the guard and actions without leaving or entering anything. |
 | **Guard** | A predicate that must pass for the transition to be committed. Sync or async. Returning `false` rejects with `GuardRejectedError`. |
 | **Action** | A function that runs during a committed transition. Sync or async. Receives the staged context, the state being left and the event. |
 | **Entry / exit hooks** | Arrays of actions run when a state is entered or left, in declaration order. |
@@ -420,6 +423,145 @@ handle an event, so a leaf that declares nothing is not done while its parent st
 The resulting union types `state`, `matches()`, snapshots and the state paths returned by
 `restore()`. `NestedMachineDefinition` remains available for explicitly annotated definitions, but
 ordinary machine declarations do not need a manually maintained path union.
+
+---
+
+## Parallel states
+
+A state declared `type: "parallel"` is active together with **all** of its children. Each child is a
+region, and each region handles events on its own.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+const machine = createMachine({
+  id: "editor",
+  initial: "open",
+  context: { saved: false },
+  states: {
+    open: {
+      type: "parallel",
+      states: {
+        document: {
+          initial: "clean",
+          states: { clean: { on: { EDIT: "dirty" } }, dirty: {} },
+        },
+        toolbar: {
+          initial: "plain",
+          states: { plain: { on: { ZOOM: "zoomed" } }, zoomed: {} },
+        },
+      },
+    },
+  },
+});
+
+console.log(machine.state); // "open"
+console.log(machine.configuration); // ["open.document.clean", "open.toolbar.plain"]
+
+await machine.send("EDIT"); // only the document region moves
+console.log(machine.configuration); // ["open.document.dirty", "open.toolbar.plain"]
+```
+
+**One event, several regions.** An event is offered to every region. A region that declares it takes
+its own transition, so a single `send()` can advance several regions at once, and they all commit
+together as one microstep: one `revision` increment and one notification.
+
+```ts
+await machine.send("BOTH"); // both regions declare BOTH, so both transition
+```
+
+**Who wins a conflict.** Two regions can pick transitions that would each exit the other's states,
+for instance when both target a state outside the parallel state. The deeper declaration wins, and
+when neither is an ancestor of the other the region that appears first in document order wins. The
+losing transition does not run at all. A handler declared on the parallel state itself is therefore
+preempted by any region that declares the same event.
+
+**Guards.** A guard that returns `false` disables only its own region's transition, and the other
+regions still commit. When no region's guard accepts, the event rejects with `GuardRejectedError`
+and nothing changes, which is what a machine with no parallel state has always done. A guard that
+*throws* aborts the whole microstep instead.
+
+**Declare in-region transitions inside the region.** A region is not a proper ancestor of itself, so
+a transition declared *on* a region always reaches above the parallel state: it exits and re-enters
+the whole parallel state, which resets sibling regions. Declaring the transition on a state inside
+the region keeps the change local.
+
+**Nothing is implicitly parallel.** While a parallel state is active, `machine.state` reports that
+parallel state, because no deeper state contains every active leaf, and `configuration` carries the
+leaf paths. `matches(path)` answers for the parallel state, each region and each active leaf, so a
+leaf in one region never matches a sibling region's leaf. `getNextEvents()` lists every event any
+active state declares, in document order.
+
+---
+
+## History states
+
+A state declared `type: "history"` remembers the configuration of its parent when that parent is
+exited. Targeting the pseudo-state returns to it.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+const machine = createMachine({
+  id: "wizard",
+  initial: "steps",
+  context: {},
+  states: {
+    steps: {
+      initial: "account",
+      on: { SUSPEND: "suspended" },
+      states: {
+        account: { on: { NEXT: "billing" } },
+        billing: {},
+        // Remembers every active atomic state below `steps`, not just the direct child.
+        remember: { type: "history", history: "deep", target: "account" },
+      },
+    },
+    suspended: { on: { RESUME: "steps.remember" } },
+  },
+});
+
+await machine.send("NEXT"); // steps.billing
+await machine.send("SUSPEND");
+await machine.send("RESUME");
+console.log(machine.state); // "steps.billing", not the initial "steps.account"
+```
+
+- `history: "deep"` records every active atomic descendant of the parent, so a parallel parent
+  restores each region exactly.
+- `history: "shallow"` records only the parent's active direct children. A remembered compound child
+  is then entered through its own default entry, which is why shallow memory of a parallel parent
+  resets every region.
+- `target` is the state entered on the **first** entry, before any memory exists. Without it, the
+  parent is entered through its ordinary default entry.
+- Memory is captured when the parent is exited, before that state's `exit` hooks run, and it is part
+  of the snapshot, so it survives serialization.
+- A history pseudo-state is never active: it never appears in `configuration`, never matches, and
+  cannot be the target of an `initial` value.
+
+---
+
+## Targetless transitions
+
+Omitting `target` runs the transition's guard and actions and leaves the machine where it is.
+SCXML defines both the exit set and the entry set of such a transition as empty, so nothing is
+exited, nothing is entered, no lifecycle hook runs, and the configuration does not change.
+
+```ts
+on: {
+  // Reacts to the event without moving anything.
+  AUDIT: { actions: [({ context }) => { context.audited += 1; }] },
+  // Re-enters this state: exit hooks, actions and entry hooks all run.
+  REFRESH: { target: "editing" },
+}
+```
+
+This is the way to react inside one region of a parallel state without disturbing its siblings or its
+nested state, because a targetless transition touches nothing. A transition that should re-enter its
+own state has to name that state, which is what a self-transition is.
+
+A targetless transition still counts as a commit: `revision` advances by one and subscribers are
+notified, with `state` and `previous` both reporting the unchanged configuration.
 
 ---
 
@@ -612,8 +754,10 @@ console.log(log);
 
 ### 4. Retry loop with a self-transition
 
-A transition without `target` stays in the same state but still runs exit hooks, actions and entry
-hooks - which makes it a clean way to model an attempt counter.
+A self-transition names the state it is declared in, so that state is exited and entered again and
+its exit, action and entry hooks all run - which makes it a clean way to model an attempt counter.
+Omitting `target` instead runs the actions without moving the machine at all, which is how you react
+to an event without resetting anything.
 
 ```ts
 import { createMachine } from "motivo-stateflow";
@@ -630,6 +774,7 @@ const machine = createMachine({
     uploading: {
       on: {
         RETRY: {
+          target: "uploading",
           guard: ({ context }) => context.attempts < 3,
           actions: [
             ({ context }) => {
@@ -1583,7 +1728,7 @@ Returns a machine. The definition is validated eagerly: a malformed definition t
 
 | Option | Type | Description |
 | --- | --- | --- |
-| `schemaVersion` | `number` (default `1`) | Stamped into every snapshot and checked by `restore()`. Bump it when the context shape or transition graph changes, and old snapshots are rejected instead of applied silently. |
+| `schemaVersion` | `number` (default `2`) | Stamped into every snapshot and checked by `restore()`. Bump it when the context shape or transition graph changes, and old snapshots are rejected instead of applied silently. A stored version of `1`, or none at all, is a 0.1.0 snapshot and is migrated; any other version is refused. |
 | `parseContext` | `(input: unknown) => TContext` | Validates and rehydrates a restored context. Must return a valid context or throw; a throw rejects the snapshot with the original error on `cause`. |
 | `maxQueueDepth` | `number` (default `Infinity`) | Caps how many submissions may be queued at once. Must be a positive integer. Every submission that queues work counts, including the one currently running; a submission that arrives at the cap is refused with `QueueOverflowError` instead of being queued. |
 
@@ -1633,7 +1778,8 @@ console.log(machine.snapshot().schemaVersion); // 2
 | --- | --- | --- |
 | Shorthand | `CONFIRM: "confirmed"` | Unconditional transition to `confirmed`. |
 | Object | `PROCESS: { target: "processing", guard, actions }` | Conditional transition with side effects. |
-| Self-transition | `RETRY: {}` or `RETRY: { actions: [fn] }` | Stays in the same state; exit hooks, actions and entry hooks still run. |
+| Targetless | `AUDIT: {}` or `AUDIT: { guard, actions }` | Runs the guard and actions while the configuration stays as it is: nothing is exited and nothing is entered. |
+| Self-transition | `RETRY: { target: "counting" }` | Re-enters the named state, so `exit` hooks, actions and `entry` hooks run and a compound state resets to its initial child. |
 
 A target is written in one of three forms:
 
@@ -1773,8 +1919,10 @@ Because a running check is pending work, `whenIdle()` waits for it.
 | `event`    | `TEvent \| null`    | The full event value that produced this snapshot, or `null` when none did.      |
 | `previous` | `TState \| null`    | The state path before the transition that produced this snapshot, or `null` when no transition did. |
 | `revision` | `number`            | Committed transitions on this instance. Never restored from storage.             |
-| `done`     | `boolean`           | `true` when no state in the active configuration declares an outgoing transition. |
+| `done`     | `boolean`           | `true` when no state in the active configuration, in any region, declares an outgoing transition. |
 | `schemaVersion` | `number`       | Version stamped by the machine, checked by `restore()`.                          |
+| `configuration` | `readonly TState[]` | Active atomic state paths, in document order. The authoritative view of the configuration, and the only field that expresses a parallel state. |
+| `history`  | `Readonly<Record<string, readonly TState[]>>` | Configuration remembered per history pseudo-state path, empty for a machine with no history. |
 
 The snapshots returned by `send()` and delivered to subscribers describe the transition that produced
 them, so `event` and `previous` are filled in. Snapshots from `machine.snapshot()`, `toJSON()` and
@@ -2196,7 +2344,8 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 
 | Constraint | Detail |
 | --- | --- |
-| Compound states only | Flat and compound/nested states are supported; parallel regions and history are not implemented. |
+| Parallel regions and history | Flat, compound and parallel states are supported, with shallow and deep history pseudo-states. Internal transitions, raised events and delayed events are not. |
+| No internal transitions | Every transition is external: a state that declares a transition is exited and re-entered, even when the target is inside it. A transition declaration that carries `type` is rejected, so the field stays reserved. To reset one region of a parallel state without disturbing its siblings, declare the transition on a state inside that region and target a state inside that region as well. |
 | No delayed transitions or timers | There is no `after`/`delay` support and no clock injection. Schedule externally and `send()` when the time comes. |
 | No actor composition | One machine per process object; invoking child machines is on the roadmap. |
 | No durable execution | Snapshots can be persisted and restored, but there is no checkpointing, lease/ownership, or recovery loop. |
@@ -2210,13 +2359,15 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 
 Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantics intact:
 
-1. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, richer error
+1. **Internal transitions** - `type: "internal" | "external"` on a transition, so a state can react
+   without being exited and re-entered. The field is reserved and currently rejected.
+2. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, richer error
    taxonomy, inspection records.
-2. **Advanced states** - parallel states, history, internal/raised/delayed events.
-3. **Actors and composition** - spawned child machines, message routing, supervision.
-4. **Workflow layer** - multi-machine sagas with compensation and human tasks.
-5. **Durable execution** - stores, checkpointing, recovery, migrations.
-6. **Tooling** - CLI, graph analysis, visualization, model-based testing, framework adapters.
+3. **Advanced states** - raised and delayed events, final states and completion events.
+4. **Actors and composition** - spawned child machines, message routing, supervision.
+5. **Workflow layer** - multi-machine sagas with compensation and human tasks.
+6. **Durable execution** - stores, checkpointing, recovery, migrations.
+7. **Tooling** - CLI, graph analysis, visualization, model-based testing, framework adapters.
 
 ---
 
@@ -2240,6 +2391,9 @@ The suite is organised into focused files:
 | `tests/creation.test.ts`      | Machine creation, definition validation, snapshot shape.                   |
 | `tests/transitions.test.ts`   | Transitions, event resolution, terminal states, self-transitions.          |
 | `tests/nested.test.ts`        | Compound states: paths, target forms, bubbling, ordering across levels, `matches()`. |
+| `tests/parallel.test.ts`      | Parallel regions: configuration reporting, per-region selection, conflict resolution, exit sets, microstep atomicity. |
+| `tests/history.test.ts`       | History pseudo-states: shallow and deep memory, default targets, capture on exit, serialization. |
+| `tests/ordering.test.ts`      | Exit, action and entry ordering across the source-to-target path, including the least common ancestor. |
 | `tests/guards.test.ts`        | Sync/async guards, argument shape, rejection, stale-state protection.      |
 | `tests/actions.test.ts`       | Hook ordering, async hooks, failure atomicity, context updates.            |
 | `tests/inspection.test.ts`    | `can()` and `getNextEvents()`: guard evaluation, queue ordering, read-only guarantees. |

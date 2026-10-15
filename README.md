@@ -9,7 +9,7 @@ persistence and tooling are planned, not implemented.
 
 | Capability | Package | Status |
 | --- | --- | --- |
-| Machine Engine: flat and compound/nested states, guards, transitions | `motivo-stateflow` ([packages/core](packages/core)) | Implemented: compound-state bubbling, typed payload events, hooks, snapshots, validated restoration, subscriptions and inspection. Parallel and history states are not implemented. |
+| Machine Engine: flat, compound, parallel states and history, guards, transitions | `motivo-stateflow` ([packages/core](packages/core)) | Implemented: compound-state bubbling, `type: "parallel"` regions with SCXML conflict resolution, `type: "history"` shallow and deep memory, typed payload events, hooks, snapshots, validated restoration, subscriptions and inspection. Internal transitions are reserved but not implemented. |
 | Workflow Runtime: long-running workflows, timers, retries, recovery, cancellation | `@motivo/workflow` | Planned. Design is pinned by the durability decision below. |
 | Durability: persistence, checkpoints, event logs, replay, crash recovery | `@motivo/persistence` and adapters (`@motivo/persistence-sqlite`, `@motivo/persistence-postgres`) | Planned. v1 targets recovery after a process restart or crash, with in-memory and SQLite adapters. |
 | Observability: execution traces, transition history, metrics | `@motivo/devtools` | Planned. Core inspection with `can()` and `getNextEvents()` is implemented. |
@@ -30,18 +30,27 @@ The engine package is currently versioned `0.1.0`.
   nearest state that declares them, exit and entry hooks run deepest-first and shallowest-first
   across levels, `machine.state` reports the active leaf as a dotted path, and `matches(path)`
   answers for the leaf and every state containing it.
+- Parallel states: `type: "parallel"` makes every child a region that is active at once. One event
+  can advance several regions in a single microstep, each region may take a different transition,
+  and conflicts are resolved by declaring-state depth and then by document order.
+- History: `type: "history"` remembers a state's configuration on exit, either its active direct
+  children (shallow) or every active atomic descendant (deep), with an optional default target for
+  first entry. Memory is serialized with the snapshot.
 - Payload events use `{ type: "NAME", ...payload }`; payload-free events retain the string
   shorthand. Guards, actions, hooks, snapshots and subscriptions receive the complete event.
+- A transition without `target` runs its guard and actions and leaves the configuration alone, which
+  is how a region reacts to an event without resetting its siblings.
 - Guards (sync or async), transition actions, and entry and exit hooks, with atomic commits: a
   failure anywhere in a transition changes nothing.
 - Deterministic processing. Events are queued per machine and processed in submission order, so
   concurrent `send()` calls never commit against stale state. `maxQueueDepth` caps how much work may
   be queued at once, so a burst fails fast instead of accumulating.
-- Snapshots, subscriptions and validated restoration, including a `schemaVersion` check and an
-  optional `parseContext` validator for contexts that JSON cannot represent.
-- Inspection without side effects: `getNextEvents()` lists what the committed state accepts, and
-  `can(event)` reports whether a transition would commit while committing nothing.
-- 228 runtime tests and 27 compile-time tests, including property-based invariants. The consumer
+- Snapshots, subscriptions and validated restoration, including a `schemaVersion` check, migration
+  of 0.1.0 snapshots, and an optional `parseContext` validator for contexts that JSON cannot
+  represent.
+- Inspection without side effects: `getNextEvents()` lists what the committed configuration accepts,
+  and `can(event)` reports whether a transition would commit while committing nothing.
+- 258 runtime tests and 29 compile-time tests, including property-based invariants. The consumer
   verification script targets TypeScript 5.4, 5.9 and the latest release.
 
 Full API guide, examples and semantics: [packages/core/README.md](packages/core/README.md).
