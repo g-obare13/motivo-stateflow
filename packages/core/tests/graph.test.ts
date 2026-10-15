@@ -292,4 +292,49 @@ describe("leastCommonCompoundAncestor", () => {
       { numRuns: NUM_RUNS },
     );
   });
+
+  it("skips a non-compound node that is the nearest common ancestor", () => {
+    // Declared explicitly rather than generated: only the kind check decides the answer here, so the
+    // case has to be hit on every run rather than whenever a generated tree happens to contain it.
+    const nested = materialise({
+      kind: "compound",
+      children: [
+        {
+          kind: "compound",
+          children: [
+            {
+              kind: "parallel",
+              children: [
+                { kind: "atomic", children: [] },
+                { kind: "atomic", children: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    const [outerCompound, parallelState, region1, region2] = nested.nodes;
+    expect(parallelState?.kind).toBe("parallel");
+
+    // The parallel state does contain both regions, but a domain has to be compound, so the walk
+    // continues to the compound state above it.
+    expect(leastCommonCompoundAncestor([region1!, region2!], nested.root)).toBe(outerCompound);
+
+    // A top-level parallel state leaves the root as the only compound ancestor.
+    const top = materialise({
+      kind: "compound",
+      children: [
+        {
+          kind: "parallel",
+          children: [
+            { kind: "atomic", children: [] },
+            { kind: "atomic", children: [] },
+          ],
+        },
+      ],
+    });
+
+    expect(leastCommonCompoundAncestor(top.nodes, top.root)).toBe(top.root);
+  });
 });
