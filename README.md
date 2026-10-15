@@ -10,7 +10,7 @@ top of it without turning the engine into a framework.
 
 | Capability | Package | Status |
 | --- | --- | --- |
-| Machine Engine: hierarchical and parallel states, guards, transitions, history | `motivo-stateflow` ([packages/core](packages/core)) | In progress. Flat machines, guards, hooks, snapshots, validated restoration, per-state type narrowing and inspection helpers are implemented. Hierarchical, parallel and history states are next. |
+| Machine Engine: hierarchical and parallel states, guards, transitions, history | `motivo-stateflow` ([packages/core](packages/core)) | In progress. Compound states, guards, hooks, snapshots, validated restoration, per-state type narrowing and inspection helpers are implemented. Parallel states and history are next. |
 | Workflow Runtime: long-running workflows, timers, retries, recovery, cancellation | `@motivo/workflow` | Planned. Design is pinned by the durability decision below. |
 | Durability: persistence, checkpoints, event logs, replay, crash recovery | `@motivo/persistence` and adapters (`@motivo/persistence-sqlite`, `@motivo/persistence-postgres`) | Planned. v1 targets recovery after a process restart or crash, with in-memory and SQLite adapters. |
 | Observability: execution traces, transition history, metrics, inspection | `@motivo/devtools` | Planned. |
@@ -28,6 +28,10 @@ verified as available before publication.
 - Per-state narrowing: a guard, action or hook sees the state that declares it and the event it
   belongs to, so a reach the runtime could never take is a compile error rather than a silent
   comparison against the wrong union.
+- Nested states: a state may contain child states and start in one of them. Events bubble to the
+  nearest state that declares them, exit and entry hooks run deepest-first and shallowest-first
+  across levels, `machine.state` reports the active leaf as a dotted path, and `matches(path)`
+  answers for the leaf and every state containing it.
 - Guards (sync or async), transition actions, and entry and exit hooks, with atomic commits: a
   failure anywhere in a transition changes nothing.
 - Deterministic processing. Events are queued per machine and processed in submission order, so
@@ -37,7 +41,7 @@ verified as available before publication.
   optional `parseContext` validator for contexts that JSON cannot represent.
 - Inspection without side effects: `getNextEvents()` lists what the committed state accepts, and
   `can(event)` reports whether a transition would commit while committing nothing.
-- 170 runtime tests and 24 compile-time tests, including property-based invariants, coverage
+- 198 runtime tests and 25 compile-time tests, including property-based invariants, coverage
   thresholds over the engine source, and consumer verification across TypeScript 5.4, 5.9 and 7.0.
   CI runs on Linux and Windows on Node 22, 24 and 26.
 
@@ -83,7 +87,7 @@ current limitations and the stability notes live in
 
 Order of work:
 
-1. Machine Engine: hierarchical, parallel and history states.
+1. Machine Engine: parallel states and history.
 2. Workflow Runtime: timers and scheduling, retry with backoff, cancellation, lifecycle status and
    recovery, with an injectable clock. The persistence contract is designed with this API rather
    than after it.

@@ -8,7 +8,7 @@
 
 import { expectTypeOf, test } from "vitest";
 import { createMachine } from "../src/index.js";
-import type { MachineDefinition, MachineSnapshot } from "../src/index.js";
+import type { MachineDefinition, MachineSnapshot, NestedMachineDefinition } from "../src/index.js";
 
 type OrderContext = { orderId: string; paymentAuthorized: boolean };
 type OrderState = "pending" | "confirmed" | "processing" | "shipped";
@@ -481,4 +481,80 @@ test("types can() and getNextEvents()", () => {
   // @ts-expect-error the returned array is the declared event union
   const events: "TOGGLE"[] = orderMachine.getNextEvents();
   void events;
+
+  expectTypeOf(orderMachine.matches).parameter(0).toEqualTypeOf<OrderState>();
+  // @ts-expect-error "ghost" is not a declared state
+  void orderMachine.matches("ghost");
+});
+
+test("types a nested machine through NestedMachineDefinition", () => {
+  type DocPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
+  type DocEvent = "SUBMIT" | "BACK" | "DISCARD";
+  type DocContext = { paymentAuthorized: boolean };
+
+  const definition: NestedMachineDefinition<DocContext, DocPath, DocEvent> = {
+    id: "doc",
+    initial: "draft",
+    context: { paymentAuthorized: false },
+    states: {
+      draft: {
+        initial: "editing",
+        entry: [
+          (args) => {
+            // The declaring state is narrowed, and a nested state narrows to its own path.
+            expectTypeOf(args.state).toEqualTypeOf<"draft">();
+          },
+        ],
+        states: {
+          editing: {
+            on: {
+              SUBMIT: {
+                target: "draft.reviewing",
+                guard: (args) => {
+                  expectTypeOf(args.state).toEqualTypeOf<"draft.editing">();
+                  expectTypeOf(args.event).toEqualTypeOf<"SUBMIT">();
+                  return args.context.paymentAuthorized;
+                },
+              },
+            },
+          },
+          reviewing: { on: { BACK: "editing" } },
+        },
+        on: { DISCARD: "published" },
+      },
+      published: {},
+    },
+  };
+
+  const machine = createMachine(definition);
+
+  // The machine reports paths, so nested states are part of the state union.
+  expectTypeOf(machine.state).toEqualTypeOf<DocPath>();
+  expectTypeOf(machine.matches).parameter(0).toEqualTypeOf<DocPath>();
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<DocEvent>();
+  expectTypeOf(machine.snapshot().previous).toEqualTypeOf<DocPath | null>();
+
+  // Typed so the test can ask about a path the machine does not declare.
+  void machine.matches("draft.ghost" as DocPath);
+
+  const badInitial: NestedMachineDefinition<DocContext, DocPath, DocEvent> = {
+    id: "doc",
+    // @ts-expect-error the machine's initial state is a top-level state, not a path into one
+    initial: "draft.editing",
+    context: { paymentAuthorized: false },
+    states: {
+      draft: { initial: "editing", states: { editing: {}, reviewing: {} } },
+      published: {},
+    },
+  };
+  void badInitial;
+
+  const missingChildren: NestedMachineDefinition<DocContext, DocPath, DocEvent> = {
+    id: "doc",
+    initial: "draft",
+    context: { paymentAuthorized: false },
+    // @ts-expect-error a compound state must declare its children
+    states: { draft: { on: { DISCARD: "published" } }, published: {} },
+  };
+  void missingChildren;
 });

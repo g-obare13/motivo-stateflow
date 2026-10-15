@@ -33,21 +33,36 @@ import type {
  * copied into a local array, so later mutation of the caller's definition cannot change the
  * behaviour of a running machine.
  */
-type NormalizedTransition<TContext, TState extends string, TEvent extends string> = {
-  target: TState;
-  guard?: GuardFn<TContext, TState, TEvent>;
-  actions?: Array<ActionFn<TContext, TState, TEvent>>;
+type CompiledTransition<TContext> = {
+  target: CompiledState<TContext>;
+  guard?: GuardFn<TContext, string, string>;
+  actions?: Array<ActionFn<TContext, string, string>>;
 };
 
 /**
- * A state after normalization. Transitions live in a `Map`, which removes every prototype-chain
+ * A state after compilation. States form a tree: a compound state holds its children by key and
+ * remembers the child to enter. Transitions live in a `Map`, which removes every prototype-chain
  * hazard: events such as `toString`, `constructor` or `hasOwnProperty` resolve only when they
  * are declared explicitly.
+ *
+ * The machine's top level hangs off a virtual root, whose own key and path are empty and which
+ * declares no hooks. That gives resolution and the least common ancestor arithmetic one uniform
+ * shape: every top-level state is simply a child of the root.
  */
-type NormalizedState<TContext, TState extends string, TEvent extends string> = {
-  entry: Array<ActionFn<TContext, TState, TEvent>>;
-  exit: Array<ActionFn<TContext, TState, TEvent>>;
-  transitions: Map<string, NormalizedTransition<TContext, TState, TEvent>>;
+type CompiledState<TContext> = {
+  /** Dot-joined path from the top level, for example `"draft.editing"`. Empty for the root. */
+  path: string;
+  /** This state's own key, as the definition writes it. Empty for the root. */
+  key: string;
+  /** Enclosing state, or the root itself for the root. */
+  parent: CompiledState<TContext>;
+  /** Nested states by key, in declaration order. */
+  children: Map<string, CompiledState<TContext>>;
+  /** Child entered when this state is entered. Absent for a leaf. */
+  initialChild?: CompiledState<TContext>;
+  entry: Array<ActionFn<TContext, string, string>>;
+  exit: Array<ActionFn<TContext, string, string>>;
+  transitions: Map<string, CompiledTransition<TContext>>;
 };
 
 /**
@@ -70,7 +85,7 @@ type ListenerRecord<TContext, TState extends string, TEvent extends string> = {
  * @typeParam TEvent - Union of declared event names.
  * @param definition - Declarative machine definition.
  * @returns A runtime machine exposing `id`, `state`, `context`, `send`, `can`, `getNextEvents`,
- * `subscribe`, `snapshot`, `restore`, `whenIdle` and `toJSON`.
+ * `matches`, `subscribe`, `snapshot`, `restore`, `whenIdle` and `toJSON`.
  * @throws {MachineConfigurationError} When the definition is malformed.
  *
  * @example
@@ -90,10 +105,15 @@ type ListenerRecord<TContext, TState extends string, TEvent extends string> = {
  * console.log(machine.state); // "confirmed"
  * ```
  */
-export function createMachine<TContext extends object, TState extends string, TEvent extends string>(
-  definition: MachineDefinition<TContext, TState, TEvent>,
+export function createMachine<
+  TContext extends object,
+  TState extends string,
+  TEvent extends string,
+  TPath extends string = TState,
+>(
+  definition: MachineDefinition<TContext, TState, TEvent, TPath>,
   options: MachineOptions<TContext> = {},
-): Machine<TContext, TState, TEvent> {
+): Machine<TContext, TPath, TEvent> {
   const raw = definition as unknown as {
     id?: unknown;
     initial?: unknown;
@@ -110,8 +130,7 @@ export function createMachine<TContext extends object, TState extends string, TE
     raw.states,
     `Machine "${machineId}" must declare a "states" object.`,
   );
-  const stateNames = Object.keys(rawStates);
-  if (stateNames.length === 0) {
+  if (Object.keys(rawStates).length === 0) {
     throw new MachineConfigurationError(`Machine "${machineId}" must declare at least one state.`);
   }
   assertPlainObject(
@@ -124,14 +143,11 @@ export function createMachine<TContext extends object, TState extends string, TE
     );
   }
 
-  const initialState = raw.initial as TState;
-  const states = normalizeStates<TContext, TState, TEvent>(machineId, rawStates);
-  const recognizedEvents = new Set<string>();
-  for (const state of states.values()) {
-    for (const eventName of state.transitions.keys()) {
-      recognizedEvents.add(eventName);
-    }
-  }
+  const { root, initialLeaf, pathIndex, recognizedEvents } = compileTree<TContext>(
+    machineId,
+    rawStates,
+    raw.initial,
+  );
 
   const rawOptions = options as unknown as {
     schemaVersion?: unknown;
@@ -168,7 +184,7 @@ export function createMachine<TContext extends object, TState extends string, TE
   const maxQueueDepth =
     (rawOptions.maxQueueDepth as number | undefined) ?? Number.POSITIVE_INFINITY;
 
-  let currentState = initialState;
+  let currentState = initialLeaf;
   let currentContext: TContext = cloneContext(raw.context as TContext, () => {
     throw new MachineConfigurationError(
       `Machine "${machineId}" context must be structured-cloneable: it cannot contain functions or other non-cloneable values.`,
@@ -178,7 +194,7 @@ export function createMachine<TContext extends object, TState extends string, TE
   let queueTail: Promise<void> = Promise.resolve();
   let pending = 0;
   const idleWaiters = new Set<() => void>();
-  const listeners = new Set<ListenerRecord<TContext, TState, TEvent>>();
+  const listeners = new Set<ListenerRecord<TContext, TPath, TEvent>>();
 
   const finishQueuedTask = (): void => {
     pending -= 1;
@@ -214,30 +230,113 @@ export function createMachine<TContext extends object, TState extends string, TE
     return result;
   };
 
-  const isTerminal = (state: TState): boolean => (states.get(state)?.transitions.size ?? 0) === 0;
+  /** Active states from `state` up to the top level, deepest first. The root is not included. */
+  const chainOf = (state: CompiledState<TContext>): Array<CompiledState<TContext>> => {
+    const chain: Array<CompiledState<TContext>> = [];
+    for (let node = state; node !== root; node = node.parent) {
+      chain.push(node);
+    }
+    return chain;
+  };
+
+  /** True when `node` sits anywhere below `ancestor` in the tree. */
+  const isDescendantOf = (
+    node: CompiledState<TContext>,
+    ancestor: CompiledState<TContext>,
+  ): boolean => {
+    for (let current = node.parent; current !== root; current = current.parent) {
+      if (current === ancestor) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  /** Deepest state containing both nodes; the root when they only share the top level. */
+  const commonAncestor = (
+    left: CompiledState<TContext>,
+    right: CompiledState<TContext>,
+  ): CompiledState<TContext> => {
+    let a = left;
+    let b = right;
+    while (depthOf(a) > depthOf(b)) {
+      a = a.parent;
+    }
+    while (depthOf(b) > depthOf(a)) {
+      b = b.parent;
+    }
+    while (a !== b) {
+      a = a.parent;
+      b = b.parent;
+    }
+    return a;
+  };
+
+  /**
+   * Exit set for a transition: the active states from the leaf up to and including the state that
+   * declares the transition, deepest first. A transition bubbled to an ancestor therefore exits
+   * every active state below that ancestor as well.
+   */
+  const exitChain = (source: CompiledState<TContext>): Array<CompiledState<TContext>> => {
+    const chain: Array<CompiledState<TContext>> = [];
+    for (const node of chainOf(currentState)) {
+      chain.push(node);
+      if (node === source) {
+        break;
+      }
+    }
+    return chain;
+  };
+
+  /**
+   * Entry set for a transition: the states from just below the boundary that both ends share down
+   * to the target, then the target's initial children down to a leaf. A target that is the source
+   * itself, or a descendant of it, re-enters the source, which is what makes a self-transition on
+   * a compound state reset it to its initial child.
+   */
+  const entryChain = (
+    source: CompiledState<TContext>,
+    target: CompiledState<TContext>,
+  ): Array<CompiledState<TContext>> => {
+    const boundary =
+      target === source || isDescendantOf(target, source) ? source.parent : commonAncestor(source, target);
+    const chain: Array<CompiledState<TContext>> = [];
+    for (let node = target; node !== boundary; node = node.parent) {
+      chain.push(node);
+    }
+    chain.reverse();
+    for (let child = target.initialChild; child; child = child.initialChild) {
+      chain.push(child);
+    }
+    return chain;
+  };
+
+  /** A configuration is done when no state in it can handle an event. */
+  const isDone = (state: CompiledState<TContext>): boolean =>
+    chainOf(state).every((node) => node.transitions.size === 0);
 
   const buildSnapshot = (
-    state: TState,
+    state: CompiledState<TContext>,
     context: TContext,
     event: TEvent | null,
-    previous: TState | null,
-  ): MachineSnapshot<TContext, TState, TEvent> => ({
+    previous: CompiledState<TContext> | null,
+  ): MachineSnapshot<TContext, TPath, TEvent> => ({
     id: machineId,
-    state,
+    state: state.path as TPath,
     context,
     event,
-    previous,
+    previous: previous === null ? null : (previous.path as TPath),
     revision,
-    done: isTerminal(state),
+    done: isDone(state),
     schemaVersion,
   });
 
-  const snapshot = (): MachineSnapshot<TContext, TState, TEvent> =>
+  const snapshot = (): MachineSnapshot<TContext, TPath, TEvent> =>
     buildSnapshot(currentState, cloneContext(currentContext), null, null);
 
   const notify = (
     committedContext: TContext,
-    committed: MachineSnapshot<TContext, TState, TEvent>,
+    committed: MachineSnapshot<TContext, TPath, TEvent>,
   ): void => {
     for (const record of [...listeners]) {
       try {
@@ -261,31 +360,41 @@ export function createMachine<TContext extends object, TState extends string, TE
   };
 
   /**
-   * Looks up the transition a state declares for an event, or `undefined` when the state declares
-   * none. Shared by `send()` and `can()` so both agree on what is accepted where.
+   * Looks up the transition that handles an event, walking from the active leaf up to the top
+   * level. The deepest state that declares the event wins, so a parent's `on` map acts as a
+   * fallback for events its children do not handle. Shared by `send()` and `can()` so both agree
+   * on what is accepted where.
    */
   const findTransition = (
-    state: TState,
     event: string,
-  ): NormalizedTransition<TContext, TState, TEvent> | undefined =>
-    states.get(state)?.transitions.get(event);
+  ): { source: CompiledState<TContext>; transition: CompiledTransition<TContext> } | undefined => {
+    for (const node of chainOf(currentState)) {
+      const transition = node.transitions.get(event);
+      if (transition) {
+        return { source: node, transition };
+      }
+    }
+    return undefined;
+  };
 
-  const resolveTransition = (event: string): NormalizedTransition<TContext, TState, TEvent> => {
-    const transition = findTransition(currentState, event);
-    if (transition) {
-      return transition;
+  const resolveTransition = (
+    event: string,
+  ): { source: CompiledState<TContext>; transition: CompiledTransition<TContext> } => {
+    const found = findTransition(event);
+    if (found) {
+      return found;
     }
     if (!recognizedEvents.has(event)) {
       throw new InvalidEventError(`Event "${event}" is not recognised by machine "${machineId}".`);
     }
     throw new InvalidTransitionError(
-      `Event "${event}" is not allowed in state "${currentState}" of machine "${machineId}".`,
+      `Event "${event}" is not allowed in state "${currentState.path}" of machine "${machineId}".`,
     );
   };
 
   const execute = async (
-    actions: Array<ActionFn<TContext, TState, TEvent>>,
-    args: GuardContext<TContext, TState, TEvent>,
+    actions: Array<ActionFn<TContext, string, string>>,
+    args: GuardContext<TContext, string, string>,
   ): Promise<void> => {
     for (const action of actions) {
       await action(args);
@@ -298,14 +407,14 @@ export function createMachine<TContext extends object, TState extends string, TE
    * them succeed. A failed transition is therefore a no-op for observers: no snapshot, no
    * notification.
    */
-  const runTransition = async (event: TEvent): Promise<MachineSnapshot<TContext, TState, TEvent>> => {
+  const runTransition = async (event: TEvent): Promise<MachineSnapshot<TContext, TPath, TEvent>> => {
     const eventName = normaliseEvent(event);
     const previousState = currentState;
-    const transition = resolveTransition(eventName);
+    const { source, transition } = resolveTransition(eventName);
     const stagedContext = cloneContext(currentContext);
-    const args: GuardContext<TContext, TState, TEvent> = {
+    const args: GuardContext<TContext, string, string> = {
       context: stagedContext,
-      state: previousState,
+      state: source.path,
       event,
     };
 
@@ -313,35 +422,35 @@ export function createMachine<TContext extends object, TState extends string, TE
       const accepted = await transition.guard(args);
       if (!accepted) {
         throw new GuardRejectedError(
-          `Guard rejected event "${eventName}" in state "${previousState}" of machine "${machineId}".`,
+          `Guard rejected event "${eventName}" in state "${source.path}" of machine "${machineId}".`,
         );
       }
     }
 
-    await execute(states.get(previousState)?.exit ?? [], args);
+    for (const state of exitChain(source)) {
+      await execute(state.exit, { ...args, state: state.path });
+    }
     if (transition.actions) {
       await execute(transition.actions, args);
     }
-    await execute(states.get(transition.target)?.entry ?? [], {
-      context: stagedContext,
-      state: transition.target,
-      event,
-    });
+    for (const state of entryChain(source, transition.target)) {
+      await execute(state.entry, { context: stagedContext, state: state.path, event });
+    }
 
     // The commit point. Cloning can still fail here, in which case nothing is committed and no
     // subscriber is notified, so the machine stays on its previous snapshot.
     const committedContext = cloneContext(stagedContext, () => {
       throw new MachineConfigurationError(
-        `Machine "${machineId}" context was made unclonable while transitioning to "${transition.target}", so the transition was aborted.`,
+        `Machine "${machineId}" context was made unclonable while transitioning to "${transition.target.path}", so the transition was aborted.`,
       );
     });
 
-    currentState = transition.target;
+    currentState = leafOf(transition.target);
     currentContext = committedContext;
     revision += 1;
 
     const committed = buildSnapshot(
-      transition.target,
+      currentState,
       cloneContext(committedContext),
       event,
       previousState,
@@ -354,13 +463,13 @@ export function createMachine<TContext extends object, TState extends string, TE
     get id(): string {
       return machineId;
     },
-    get state(): TState {
-      return currentState;
+    get state(): TPath {
+      return currentState.path as TPath;
     },
     get context(): TContext {
       return cloneContext(currentContext);
     },
-    send(event: TEvent): Promise<MachineSnapshot<TContext, TState, TEvent>> {
+    send(event: TEvent): Promise<MachineSnapshot<TContext, TPath, TEvent>> {
       return enqueue(() => runTransition(event));
     },
     /**
@@ -371,45 +480,62 @@ export function createMachine<TContext extends object, TState extends string, TE
     can(event: TEvent): Promise<boolean> {
       return enqueue(async () => {
         const eventName = normaliseEvent(event);
-        const transition = findTransition(currentState, eventName);
-        if (!transition) {
+        const found = findTransition(eventName);
+        if (!found) {
           return false;
         }
-        if (!transition.guard) {
+        if (!found.transition.guard) {
           return true;
         }
         return Boolean(
-          await transition.guard({
+          await found.transition.guard({
             context: cloneContext(currentContext),
-            state: currentState,
+            state: found.source.path,
             event,
           }),
         );
       });
     },
-    /** Declared events of the committed state, in declaration order. Guards are not evaluated. */
+    /**
+     * Declared events of the active configuration, shallowest state first and in declaration
+     * order within a state. Guards are not evaluated.
+     */
     getNextEvents(): TEvent[] {
-      return [...(states.get(currentState)?.transitions.keys() ?? [])] as TEvent[];
+      const events: TEvent[] = [];
+      const seen = new Set<string>();
+      for (const state of chainOf(currentState).reverse()) {
+        for (const eventName of state.transitions.keys()) {
+          if (!seen.has(eventName)) {
+            seen.add(eventName);
+            events.push(eventName as TEvent);
+          }
+        }
+      }
+      return events;
     },
-    subscribe(listener: Subscription<TContext, TState, TEvent>): Unsubscribe {
+    /** True for the active leaf and every state above it; false for an undeclared path. */
+    matches(path: TPath): boolean {
+      return chainOf(currentState).some((state) => state.path === path);
+    },
+    subscribe(listener: Subscription<TContext, TPath, TEvent>): Unsubscribe {
       if (typeof listener !== "function") {
         throw new TypeError(`Machine "${machineId}" subscribe() expects a function listener.`);
       }
-      const record: ListenerRecord<TContext, TState, TEvent> = { listener };
+      const record: ListenerRecord<TContext, TPath, TEvent> = { listener };
       listeners.add(record);
       return () => {
         listeners.delete(record);
       };
     },
     snapshot,
-    toJSON(): MachineSnapshot<TContext, TState, TEvent> {
+    toJSON(): MachineSnapshot<TContext, TPath, TEvent> {
       return snapshot();
     },
     /**
      * Restores a validated snapshot. Restoration is queued behind pending events, runs no
      * lifecycle hooks and notifies no subscribers because it is not a transition.
      */
-    restore(input: unknown): Promise<MachineSnapshot<TContext, TState, TEvent>> {
+    restore(input: unknown): Promise<MachineSnapshot<TContext, TPath, TEvent>> {
       return enqueue(() => {
         const candidate = assertPlainObject(
           input,
@@ -423,9 +549,15 @@ export function createMachine<TContext extends object, TState extends string, TE
             `Snapshot id ${describe(id)} does not match machine id "${machineId}".`,
           );
         }
-        if (typeof state !== "string" || !hasOwn(rawStates, state)) {
+        if (typeof state !== "string" || !pathIndex.has(state)) {
           throw new SnapshotValidationError(
             `Snapshot state ${describe(state)} is not declared by machine "${machineId}".`,
+          );
+        }
+        const restoredState = pathIndex.get(state) as CompiledState<TContext>;
+        if (restoredState.initialChild) {
+          throw new SnapshotValidationError(
+            `Snapshot state ${describe(state)} of machine "${machineId}" is a compound state, which the machine cannot be in; store the child state it should be in instead.`,
           );
         }
 
@@ -453,7 +585,7 @@ export function createMachine<TContext extends object, TState extends string, TE
           );
         });
 
-        currentState = state as TState;
+        currentState = restoredState;
         currentContext = nextContext as TContext;
         return snapshot();
       });
@@ -552,91 +684,265 @@ const assertActionList = <TAction>(value: unknown, message: string): Array<TActi
   return value as Array<TAction>;
 };
 
-/** Rejects transition targets that are not declared states, including prototype members. */
-const assertTarget = (
-  target: unknown,
-  rawStates: Record<string, unknown>,
-  prefix: string,
-): string => {
-  if (typeof target !== "string" || !hasOwn(rawStates, target)) {
-    throw new MachineConfigurationError(`${prefix} targets undeclared state ${describe(target)}.`);
+/** Distance from the top level, used to level two states before comparing their ancestors. */
+const depthOf = <TContext>(state: CompiledState<TContext>): number => {
+  let depth = 0;
+  for (let node = state; node.parent !== node; node = node.parent) {
+    depth += 1;
   }
-  return target;
+  return depth;
+};
+
+/** The state reached by entering initial children until a leaf is reached. */
+const leafOf = <TContext>(state: CompiledState<TContext>): CompiledState<TContext> => {
+  let node = state;
+  while (node.initialChild) {
+    node = node.initialChild;
+  }
+  return node;
 };
 
 /**
- * Validates a raw `states` declaration and copies it into the internal lookup tables, rejecting
- * every malformed value and every transition whose target is not a declared state.
+ * Looks a child up by key where an earlier check has already proved it exists, which keeps the
+ * lookup expression rather than a second unreachable guard.
  */
-const normalizeStates = <TContext, TState extends string, TEvent extends string>(
+const requireChild = <TContext>(
+  parent: CompiledState<TContext>,
+  key: string,
+): CompiledState<TContext> => parent.children.get(key) as CompiledState<TContext>;
+
+/**
+ * Compiles a raw `states` declaration into a state tree, resolving every transition target and
+ * rejecting malformed definitions eagerly.
+ */
+const compileTree = <TContext>(
   machineId: string,
   rawStates: Record<string, unknown>,
-): Map<TState, NormalizedState<TContext, TState, TEvent>> => {
-  const states = new Map<TState, NormalizedState<TContext, TState, TEvent>>();
+  initialKey: string,
+): {
+  root: CompiledState<TContext>;
+  initialLeaf: CompiledState<TContext>;
+  pathIndex: Map<string, CompiledState<TContext>>;
+  recognizedEvents: Set<string>;
+} => {
+  const root = {
+    path: "",
+    key: "",
+    parent: undefined as unknown as CompiledState<TContext>,
+    children: new Map<string, CompiledState<TContext>>(),
+    entry: [],
+    exit: [],
+    transitions: new Map<string, CompiledTransition<TContext>>(),
+  };
+  root.parent = root;
 
-  for (const stateName of Object.keys(rawStates)) {
-    const stateDefinition = assertPlainObject(
-      rawStates[stateName],
-      `State "${stateName}" of machine "${machineId}" must be a plain object.`,
-    );
-    const entry = assertActionList<ActionFn<TContext, TState, TEvent>>(
-      stateDefinition.entry,
-      `State "${stateName}" of machine "${machineId}" has an invalid "entry" hook: expected an array of functions.`,
-    );
-    const exit = assertActionList<ActionFn<TContext, TState, TEvent>>(
-      stateDefinition.exit,
-      `State "${stateName}" of machine "${machineId}" has an invalid "exit" hook: expected an array of functions.`,
-    );
-    const transitions = new Map<string, NormalizedTransition<TContext, TState, TEvent>>();
+  const pathIndex = new Map<string, CompiledState<TContext>>();
+  const recognizedEvents = new Set<string>();
+  const declaredTransitions: Array<{
+    state: CompiledState<TContext>;
+    event: string;
+    declared: unknown;
+  }> = [];
 
-    if (stateDefinition.on !== undefined) {
-      const on = assertPlainObject(
-        stateDefinition.on,
-        `State "${stateName}" of machine "${machineId}" has an invalid "on" map: expected an object.`,
+  /** Walks the raw declaration once, building every state and collecting transitions to resolve. */
+  const build = (states: Record<string, unknown>, parent: CompiledState<TContext>): void => {
+    for (const key of Object.keys(states)) {
+      if (key.includes(".")) {
+        throw new MachineConfigurationError(
+          `State name ${describe(key)} in machine "${machineId}" cannot contain a dot, because a dot separates a state path into nested states.`,
+        );
+      }
+
+      const path = parent.path === "" ? key : `${parent.path}.${key}`;
+      const definition = assertPlainObject(
+        states[key],
+        `State "${path}" of machine "${machineId}" must be a plain object.`,
       );
+      const node: CompiledState<TContext> = {
+        path,
+        key,
+        parent,
+        children: new Map<string, CompiledState<TContext>>(),
+        entry: assertActionList<ActionFn<TContext, string, string>>(
+          definition.entry,
+          `State "${path}" of machine "${machineId}" has an invalid "entry" hook: expected an array of functions.`,
+        ),
+        exit: assertActionList<ActionFn<TContext, string, string>>(
+          definition.exit,
+          `State "${path}" of machine "${machineId}" has an invalid "exit" hook: expected an array of functions.`,
+        ),
+        transitions: new Map<string, CompiledTransition<TContext>>(),
+      };
 
-      for (const eventName of Object.keys(on)) {
-        const declared = on[eventName];
-        const prefix = `Transition for event "${eventName}" in state "${stateName}" of machine "${machineId}"`;
+      parent.children.set(key, node);
+      pathIndex.set(path, node);
 
-        if (typeof declared === "string") {
-          transitions.set(eventName, { target: assertTarget(declared, rawStates, prefix) as TState });
-          continue;
-        }
-
-        const transition = assertPlainObject(
-          declared,
-          `${prefix} must be a state name or a transition object.`,
+      if (definition.on !== undefined) {
+        const on = assertPlainObject(
+          definition.on,
+          `State "${path}" of machine "${machineId}" has an invalid "on" map: expected an object.`,
         );
-        const target = (
-          transition.target === undefined
-            ? stateName
-            : assertTarget(transition.target, rawStates, prefix)
-        ) as TState;
-
-        const normalized: NormalizedTransition<TContext, TState, TEvent> = { target };
-        if (transition.guard !== undefined) {
-          if (typeof transition.guard !== "function") {
-            throw new MachineConfigurationError(
-              `${prefix} has an invalid "guard": expected a function.`,
-            );
-          }
-          normalized.guard = transition.guard as GuardFn<TContext, TState, TEvent>;
+        for (const eventName of Object.keys(on)) {
+          declaredTransitions.push({ state: node, event: eventName, declared: on[eventName] });
         }
-        const actions = assertActionList<ActionFn<TContext, TState, TEvent>>(
-          transition.actions,
-          `${prefix} has an invalid "actions" list: expected an array of functions.`,
+      }
+
+      if (definition.states !== undefined) {
+        const children = assertPlainObject(
+          definition.states,
+          `State "${path}" of machine "${machineId}" has an invalid "states" map: expected an object.`,
         );
-        if (actions.length > 0) {
-          normalized.actions = actions;
+        if (Object.keys(children).length === 0) {
+          throw new MachineConfigurationError(
+            `State "${path}" of machine "${machineId}" declares an empty "states" map; declare at least one child state or omit it.`,
+          );
+        }
+        if (typeof definition.initial !== "string" || !hasOwn(children, definition.initial)) {
+          throw new MachineConfigurationError(
+            `Compound state "${path}" of machine "${machineId}" must declare an "initial" child state, but ${describe(definition.initial)} is not one of its states.`,
+          );
         }
 
-        transitions.set(eventName, normalized);
+        build(children, node);
+        node.initialChild = requireChild(node, definition.initial);
+      } else if (definition.initial !== undefined) {
+        throw new MachineConfigurationError(
+          `State "${path}" of machine "${machineId}" declares "initial" without nested "states".`,
+        );
       }
     }
+  };
 
-    states.set(stateName as TState, { entry, exit, transitions });
+  build(rawStates, root);
+
+  // Targets are resolved after the whole tree exists, because a transition may name a sibling or
+  // an ancestor that the walk above has not reached yet.
+  for (const { state, event, declared } of declaredTransitions) {
+    state.transitions.set(event, normalizeTransition<TContext>(machineId, root, state, declared, event));
+    recognizedEvents.add(event);
   }
 
-  return states;
+  // The caller validated the initial key against the same raw object, so the state exists.
+  const initialNode = requireChild(root, initialKey);
+
+  return { root, initialLeaf: leafOf(initialNode), pathIndex, recognizedEvents };
+};
+
+/**
+ * Validates one raw transition declaration and resolves its target.
+ *
+ * Omitting `target` produces a self-transition, which re-enters the declaring state: a compound
+ * state therefore resets to its initial child.
+ */
+const normalizeTransition = <TContext>(
+  machineId: string,
+  root: CompiledState<TContext>,
+  source: CompiledState<TContext>,
+  declared: unknown,
+  eventName: string,
+): CompiledTransition<TContext> => {
+  const prefix = `Transition for event "${eventName}" in state "${source.path}" of machine "${machineId}"`;
+
+  if (typeof declared === "string") {
+    return { target: resolveTarget(root, source, declared, prefix) };
+  }
+
+  const transition = assertPlainObject(
+    declared,
+    `${prefix} must be a state name or a transition object.`,
+  );
+  const normalized: CompiledTransition<TContext> = {
+    target:
+      transition.target === undefined
+        ? source
+        : resolveTarget(root, source, transition.target, prefix),
+  };
+
+  if (transition.guard !== undefined) {
+    if (typeof transition.guard !== "function") {
+      throw new MachineConfigurationError(`${prefix} has an invalid "guard": expected a function.`);
+    }
+    normalized.guard = transition.guard as GuardFn<TContext, string, string>;
+  }
+
+  const actions = assertActionList<ActionFn<TContext, string, string>>(
+    transition.actions,
+    `${prefix} has an invalid "actions" list: expected an array of functions.`,
+  );
+  if (actions.length > 0) {
+    normalized.actions = actions;
+  }
+
+  return normalized;
+};
+
+/**
+ * Resolves a raw transition target to a compiled state.
+ *
+ * - A leading dot is relative to the declaring state: in `draft`, `.editing` is `draft.editing`.
+ * - A dotted path is absolute: `draft.editing` starts at the top level and can be written from
+ *   anywhere in the tree.
+ * - A bare name is looked up in the declaring state's own children first, then in each enclosing
+ *   state's children as the walk moves up. That is what lets a parent's `on` map act as a
+ *   fallback, and it is why a bare name can still name a sibling or a top-level state.
+ */
+const resolveTarget = <TContext>(
+  root: CompiledState<TContext>,
+  source: CompiledState<TContext>,
+  target: unknown,
+  prefix: string,
+): CompiledState<TContext> => {
+  if (typeof target !== "string") {
+    throw new MachineConfigurationError(
+      `${prefix} targets ${describe(target)}, which is not a state name.`,
+    );
+  }
+
+  const resolved = target.startsWith(".")
+    ? descend(source, target.slice(1))
+    : target.includes(".")
+      ? descend(root, target)
+      : lookupBare(root, source, target);
+
+  if (resolved === undefined) {
+    throw new MachineConfigurationError(
+      `${prefix} targets undeclared state ${describe(target)}.`,
+    );
+  }
+  return resolved;
+};
+
+/**
+ * Looks a bare target name up in the declaring state's own children, then in each enclosing
+ * state's children, moving one level up at a time until the top level has been searched.
+ */
+const lookupBare = <TContext>(
+  root: CompiledState<TContext>,
+  source: CompiledState<TContext>,
+  name: string,
+): CompiledState<TContext> | undefined => {
+  let node: CompiledState<TContext> | undefined = source;
+  while (node) {
+    const found = node.children.get(name);
+    if (found) {
+      return found;
+    }
+    node = node === root ? undefined : node.parent;
+  }
+  return undefined;
+};
+
+/** Walks a dotted path from a starting state, or returns `undefined` at the first missing key. */
+const descend = <TContext>(
+  from: CompiledState<TContext>,
+  path: string,
+): CompiledState<TContext> | undefined => {
+  let node: CompiledState<TContext> | undefined = from;
+  for (const segment of path.split(".")) {
+    node = node.children.get(segment);
+    if (node === undefined) {
+      return undefined;
+    }
+  }
+  return node;
 };

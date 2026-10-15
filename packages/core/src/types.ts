@@ -53,6 +53,67 @@ export type ActionFn<TContext, TState extends string, TEvent extends string> = (
 ) => unknown | Promise<unknown>;
 
 /**
+ * State paths that have no parent. These are the keys a `states` map writes, at the top level or
+ * inside a compound state.
+ */
+type TopLevelPaths<TPath extends string> = TPath extends `${string}.${string}` ? never : TPath;
+
+/**
+ * Full paths of the direct children of the state at `TPrefix`, or `never` when it has none.
+ *
+ * A path is a dot-joined chain of state keys from the top level, so `"draft.editing"` is the
+ * child `editing` of the top-level state `draft`.
+ */
+type ChildPaths<TPath extends string, TPrefix extends string> = TPath extends `${TPrefix}.${infer TRest}`
+  ? TRest extends `${string}.${string}`
+    ? never
+    : `${TPrefix}.${TRest}`
+  : never;
+
+/**
+ * Keys of the direct children of the state at `TPrefix`, which is what a nested `states` map and a
+ * compound state's `initial` are written against.
+ */
+type ChildKeys<TPath extends string, TPrefix extends string> =
+  ChildPaths<TPath, TPrefix> extends `${TPrefix}.${infer TKey}` ? TKey : never;
+
+/**
+ * Placeholder type used where a nested `states` map is written without the machine's path union.
+ * Its property name is the error message, because TypeScript reports the offending key when a
+ * definition is checked against it.
+ */
+type PathUnionRequired = {
+  "states: nesting needs the full state path union, supplied as the fourth type argument of MachineDefinition or through NestedMachineDefinition": never;
+};
+
+/**
+ * Bare target names: the last segment of every declared path, which is every state key in the
+ * tree. The runtime searches for a bare name in the declaring state's children, then in each
+ * enclosing state's children, so a key that exists in another branch compiles here and is
+ * rejected when the machine is created. Deriving the set from `TPath` alone, rather than from the
+ * declaring state, keeps it computable while the definition is still being checked.
+ */
+type BareTargets<TPath extends string> = TPath extends `${string}.${infer TRest}`
+  ? BareTargets<TRest>
+  : TPath;
+
+/**
+ * Relative targets are written with a leading dot and start at the declaring state's own
+ * children. Only the first segment is statically checkable, so further segments are accepted here
+ * and validated when the machine is created. A flat machine accepts none: it has no nesting for a
+ * relative path to walk into.
+ */
+type RelativeTargets<TPath extends string> = TPath extends `${string}.${string}`
+  ? `.${string}`
+  : never;
+
+/**
+ * Every form a transition target may take: a full path, a bare state key, or a relative path
+ * written with a leading dot.
+ */
+type TargetName<TPath extends string> = TPath | BareTargets<TPath> | RelativeTargets<TPath>;
+
+/**
  * Object form of a transition. `target` defaults to the current state, which produces a
  * self-transition: exit hooks, transition actions and entry hooks all run, and the state name
  * itself does not change.
@@ -63,26 +124,33 @@ export type ActionFn<TContext, TState extends string, TEvent extends string> = (
  * in, and cannot read an event the state does not declare.
  *
  * @typeParam TContext - Shape of the machine context.
- * @typeParam TState - Union of declared state names.
+ * @typeParam TPath - Union of every state path, top-level and nested.
  * @typeParam TEvent - Union of declared event names.
- * @typeParam TSource - State that declares this transition, narrowed to that single state.
+ * @typeParam TSource - State path that declares this transition, narrowed to that single path.
  * @typeParam TOwnEvent - Event this transition is declared under, narrowed to that single event.
  */
 export type TransitionDefinition<
   TContext,
-  TState extends string,
+  TPath extends string,
   TEvent extends string,
-  TSource extends TState = TState,
+  TSource extends string = TPath,
   TOwnEvent extends TEvent = TEvent,
 > = {
   /**
-   * Declared state to enter. Defaults to the current state (self-transition).
+   * Declared state path to enter, in one of three forms:
    *
-   * The `NoInfer` wrapper keeps this value position out of type inference: `TState` must come
-   * from the `states` map keys, otherwise a target that happens to be mentioned here would
-   * narrow the union and every other declared state would be rejected.
+   * - a full path, such as `"draft.reviewing"`, which is absolute and can be written anywhere;
+   * - a bare name, such as `"reviewing"`, resolved in the declaring state's children first and
+   *   then in each enclosing state's children;
+   * - a relative path with a leading dot, such as `".reviewing"`, which starts at the declaring
+   *   state's own children.
+   *
+   * Defaults to the current state (self-transition). The `NoInfer` wrapper keeps the full path
+   * union out of type inference: `TPath` must come from the state map keys, otherwise a target
+   * that happens to be mentioned here would narrow the union and every other declared state would
+   * be rejected.
    */
-  target?: NoInfer<TState>;
+  target?: NoInfer<TargetName<TPath>>;
   /** Condition that must return `true` for the transition to be committed. */
   guard?: GuardFn<TContext, TSource, TOwnEvent>;
   /** Actions executed after exit hooks and before entry hooks. */
@@ -90,22 +158,26 @@ export type TransitionDefinition<
 };
 
 /**
- * Declaration of a single state.
+ * Declaration of a single state, which is either a leaf or a compound state with nested children.
  *
  * Lifecycle hooks run only while the machine is inside the state that declares them, so their
- * `state` is narrowed to that single state. Their `event` stays the machine-wide union, because
+ * `state` is narrowed to that single path. Their `event` stays the machine-wide union, because
  * the event that enters or leaves a state varies with the transition being taken.
  *
+ * A compound state declares `initial` and `states`: entering it enters its initial child, and an
+ * event no child handles bubbles up to its own `on` map. A leaf declares neither, and the compiler
+ * rejects both on a leaf.
+ *
  * @typeParam TContext - Shape of the machine context.
- * @typeParam TState - Union of declared state names.
+ * @typeParam TPath - Union of every state path, top-level and nested.
  * @typeParam TEvent - Union of declared event names.
- * @typeParam TKey - The state this definition belongs to, narrowed to that single state.
+ * @typeParam TKey - Path of the state this definition belongs to, narrowed to that single path.
  */
 export type StateDefinition<
   TContext,
-  TState extends string,
+  TPath extends string,
   TEvent extends string,
-  TKey extends TState = TState,
+  TKey extends string = TPath,
 > = {
   /** Hooks executed when the state is entered, after transition actions. */
   entry?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<TEvent>>>;
@@ -121,30 +193,57 @@ export type StateDefinition<
    */
   on?: {
     [TEventKey in TEvent]?:
-      | NoInfer<TState>
-      | TransitionDefinition<TContext, TState, TEvent, TKey, TEventKey>;
+      | NoInfer<TargetName<TPath>>
+      | TransitionDefinition<TContext, TPath, TEvent, TKey, TEventKey>;
   };
-};
+} & ([ChildPaths<TPath, TKey>] extends [never]
+  ? {
+      /** Leaf states declare no child to enter. */
+      initial?: never;
+      /** Leaf states declare no nested states. */
+      states?: PathUnionRequired;
+    }
+  : {
+      /** Key of the child state entered when this compound state is entered. */
+      initial: ChildKeys<TPath, TKey>;
+      /** Nested states, keyed by their own name. */
+      states: {
+        [TChildKey in ChildKeys<TPath, TKey>]: StateDefinition<
+          TContext,
+          TPath,
+          TEvent,
+          `${TKey}.${TChildKey}`
+        >;
+      };
+    });
 
 /**
  * A complete machine definition.
  *
  * `states` is keyed by state name, and it is the single source of the state union: every key
  * becomes part of `TState`, even a state that no transition targets (an entry-only or planned
- * state). `initial` and the transition targets are checked against that union.
+ * state). `initial` and the transition targets are checked against the union of state paths.
  *
  * Hook and action lists accept mutable and readonly arrays alike, so a definition held in a
  * `const` variable as `as const` or checked with `satisfies` is a valid input.
  *
  * @typeParam TContext - Shape of the machine context.
- * @typeParam TState - Union of declared state names.
+ * @typeParam TState - Union of top-level state names, the keys of `states`.
  * @typeParam TEvent - Union of declared event names.
+ * @typeParam TPath - Union of every state path, including nested ones. Defaults to `TState`, which
+ * is correct for a flat machine; a machine with nested states must supply the union, because
+ * TypeScript cannot infer a recursive structure from the definition alone.
  */
-export type MachineDefinition<TContext, TState extends string, TEvent extends string> = {
+export type MachineDefinition<
+  TContext,
+  TState extends string,
+  TEvent extends string,
+  TPath extends string = TState,
+> = {
   /** Stable machine identifier, echoed in snapshots and error messages. */
   id: string;
   /**
-   * State the machine starts in. Must be a declared state.
+   * State the machine starts in. Must be a declared top-level state.
    *
    * The `NoInfer` wrapper keeps this value position out of type inference, so `TState` is
    * derived from the `states` keys alone.
@@ -159,8 +258,43 @@ export type MachineDefinition<TContext, TState extends string, TEvent extends st
    * `state` and `event` a hook, guard or action receives. It is also the inference source for
    * `TState`, so the state union is exactly the declared keys.
    */
-  states: { [TKey in TState]: StateDefinition<TContext, TState, TEvent, TKey> };
+  states: { [TKey in TState]: StateDefinition<TContext, TPath, TEvent, TKey> };
 };
+
+/**
+ * Definition shape for a machine with nested states, taking the full path union once.
+ *
+ * The top-level keys are derived from the union, so a nested machine is written against a single
+ * extra type argument:
+ *
+ * ```ts
+ * type OrderPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
+ *
+ * const definition: NestedMachineDefinition<OrderContext, OrderPath, OrderEvent> = {
+ *   id: "order",
+ *   initial: "draft",
+ *   context: { paymentAuthorized: false },
+ *   states: {
+ *     draft: {
+ *       initial: "editing",
+ *       states: { editing: {}, reviewing: {} },
+ *     },
+ *     published: {},
+ *   },
+ * };
+ *
+ * const machine = createMachine(definition);
+ * ```
+ *
+ * @typeParam TContext - Shape of the machine context.
+ * @typeParam TPath - Union of every state path, top-level and nested.
+ * @typeParam TEvent - Union of declared event names.
+ */
+export type NestedMachineDefinition<
+  TContext,
+  TPath extends string,
+  TEvent extends string,
+> = MachineDefinition<TContext, TopLevelPaths<TPath>, TEvent, TPath>;
 
 /**
  * An immutable snapshot of a machine at a point in time.
@@ -308,6 +442,17 @@ export interface Machine<TContext, TState extends string, TEvent extends string>
    * @returns A fresh array of event names; mutating it affects nothing.
    */
   getNextEvents(): TEvent[];
+  /**
+   * Reports whether the state at `path` is active.
+   *
+   * True for the active leaf and for every compound state above it, so a nested machine answers
+   * both `matches("draft.editing")` and `matches("draft")` while editing a draft. False for a
+   * path the machine does not declare, the same way `can()` answers `false` for an unknown event.
+   *
+   * @param path - A declared state path.
+   * @returns `true` when the path is part of the active configuration.
+   */
+  matches(path: TState): boolean;
   /**
    * Registers a listener called once per committed transition.
    *

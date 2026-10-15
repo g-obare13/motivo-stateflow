@@ -27,6 +27,7 @@ import { createMachine } from "motivo-stateflow";
 - [Install](#install)
 - [Five-minute tutorial](#five-minute-tutorial)
 - [Core concepts](#core-concepts)
+- [Nested states](#nested-states)
 - [Examples](#examples)
   - [1. Guarded transition with async work](#1-guarded-transition-with-async-work)
   - [2. Updating context safely](#2-updating-context-safely)
@@ -346,7 +347,7 @@ That is the whole core surface. Everything below goes deeper into patterns, use 
 | Concept | Meaning |
 | --- | --- |
 | **Definition** | The declarative object passed to `createMachine`: `id`, `initial`, `context`, `states`. Validated eagerly; a malformed definition throws `MachineConfigurationError`. |
-| **State** | A named phase of the process (`pending`, `shipped`, ...). Lives in `states`; `initial` selects the starting one. |
+| **State** | A named phase of the process (`pending`, `shipped`, ...). Lives in `states`; `initial` selects the starting one. A state that declares `states` is compound and contains child states. |
 | **Event** | A named occurrence (`CONFIRM`, `SHIP`, ...). Sent with `send()`; declared per state in that state's `on` map. |
 | **Transition** | What an event does in a state: either a target state name, or an object with `target`, `guard` and `actions`. Omitting `target` means a self-transition. |
 | **Guard** | A predicate that must pass for the transition to be committed. Sync or async. Returning `false` rejects with `GuardRejectedError`. |
@@ -357,6 +358,84 @@ That is the whole core surface. Everything below goes deeper into patterns, use 
 | **Queue** | The per-machine FIFO that serializes events. Guarantees no stale-state commits and no interleaved hooks. Its depth can be capped with the `maxQueueDepth` option. |
 | **Inspection** | Read-only views of the machine: `getNextEvents()` lists what the committed state declares, and `can(event)` reports whether a transition would commit without committing it. |
 | **Revision** | Monotonic counter of committed transitions on that instance. Failed transitions do not increment it. |
+
+---
+
+## Nested states
+
+A state that declares `states` is compound: it contains child states and starts in the one named by
+`initial`. Entering a compound state enters that child, and leaving it leaves whichever child was
+active. Nesting groups behaviour that shares a context and a set of transitions.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+import type { NestedMachineDefinition } from "motivo-stateflow";
+
+type OrderPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
+type OrderEvent = "SUBMIT" | "BACK" | "PUBLISH" | "RESET";
+type OrderContext = { paymentAuthorized: boolean };
+
+const definition: NestedMachineDefinition<OrderContext, OrderPath, OrderEvent> = {
+  id: "order",
+  initial: "draft",
+  context: { paymentAuthorized: false },
+  states: {
+    draft: {
+      initial: "editing",
+      states: {
+        editing: { on: { SUBMIT: "draft.reviewing" } },
+        reviewing: { on: { BACK: "editing", PUBLISH: "published" } },
+      },
+      // Handled whichever child is active, and a fallback for events the children ignore.
+      on: { RESET: { actions: [() => console.log("reset")] } },
+    },
+    published: {},
+  },
+};
+
+const machine = createMachine(definition);
+
+console.log(machine.state); // "draft.editing"
+await machine.send("SUBMIT");
+console.log(machine.state); // "draft.reviewing"
+console.log(machine.matches("draft")); // true: the compound state is active too
+await machine.send("RESET"); // handled by draft, so both levels exit and re-enter
+console.log(machine.state); // "draft.editing"
+```
+
+**State paths.** Every state has one: the keys from the top level joined with dots, such as
+`"draft.editing"`. `machine.state` reports the active leaf, `matches(path)` answers for that leaf and
+every state containing it, and a state name may not contain a dot, because a dot separates path
+segments.
+
+**Event bubbling.** An event is offered to the deepest active state first. If that state declares no
+transition for it, the search moves to its parent, then to the next parent, and so on. The state
+that answers owns the transition: its guard is evaluated, its actions run, and it is the state
+reported as `previous`. When two levels declare the same event, only the deeper one is reached while
+its state is active.
+
+**Lifecycle ordering across levels.** A transition exits the active states from the leaf up to the
+declaring state, deepest first, runs its actions, then enters the states from just below the
+boundary that both ends share down to the target, shallowest first. Entering a compound state also
+enters its initial children, down to a leaf. A self-transition on a compound state therefore resets
+it to its initial child. Sending `RESET` while `draft.editing` is active gives:
+
+```
+exit "draft.editing" -> exit "draft" -> actions -> enter "draft" -> enter "draft.editing"
+```
+
+**Snapshots.** A snapshot stores the active leaf path and the leaf path before the transition, so a
+snapshot taken while `editing` is active reports `state: "draft.editing"`. `restore()` accepts a
+declared leaf path and rejects a compound path, because the machine cannot be inside a compound
+state without one of its children. `done` is true only when nothing in the active configuration can
+handle an event, so a leaf that declares nothing is not done while its parent still does.
+
+**Typing.** Nested paths cannot be inferred, because TypeScript cannot reverse-map a recursive
+structure, so a nested machine supplies its path union once, through
+`NestedMachineDefinition<Context, Path, Event>` or the fourth type argument of `MachineDefinition`.
+Everything else is derived from it: which states are top level, which children belong to which
+parent, the event union, the accepted target forms, and the narrowing each hook sees. A flat machine
+needs none of this and keeps the inference described in [Type safety](#type-safety).
 
 ---
 
@@ -1506,6 +1585,8 @@ console.log(machine.snapshot().schemaVersion); // 2
 | `entry` | `ActionFn[]` or `readonly ActionFn[]`     | Actions run when the state is entered (after transition actions).   |
 | `exit`  | `ActionFn[]` or `readonly ActionFn[]`     | Actions run when the state is left (before transition actions).     |
 | `on`    | `Partial<Record<EventName, Transition>>`  | Events accepted in this state and what they do.                     |
+| `initial` | `string`                                | Key of the child entered when this compound state is entered. Required with `states`, rejected without it. |
+| `states` | `Record<StateName, StateDefinition>`     | Nested states. Present only on a compound state.                    |
 
 #### Transition forms
 
@@ -1514,6 +1595,17 @@ console.log(machine.snapshot().schemaVersion); // 2
 | Shorthand | `CONFIRM: "confirmed"` | Unconditional transition to `confirmed`. |
 | Object | `PROCESS: { target: "processing", guard, actions }` | Conditional transition with side effects. |
 | Self-transition | `RETRY: {}` or `RETRY: { actions: [fn] }` | Stays in the same state; exit hooks, actions and entry hooks still run. |
+
+A target is written in one of three forms:
+
+| Form | Example | Resolves to |
+| --- | --- | --- |
+| Full path | `"draft.reviewing"` | The named state, read from the top level, wherever it is written. |
+| Bare name | `"reviewing"` | The declaring state's own children first, then each enclosing state's children in turn. |
+| Relative | `".reviewing"` | A child of the declaring state. Only valid where the state has children. |
+
+Targets are resolved when the machine is created, so an unresolvable one throws
+`MachineConfigurationError` immediately rather than failing on an event.
 
 #### Guards, actions and hooks
 
@@ -1557,11 +1649,12 @@ export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (ac
 | Member | Signature | Description |
 | --- | --- | --- |
 | `id` | `string` | Machine identifier. |
-| `state` | `TState` | The committed state. |
+| `state` | `TState` | The committed state, as a full path for a nested machine (`"draft.editing"`). |
 | `context` | `TContext` | A fresh clone of the committed context. |
 | `send` | `(event: TEvent) => Promise<MachineSnapshot>` | Queues an event. Resolves with the committed snapshot, or rejects with the failure. |
 | `can` | `(event: TEvent) => Promise<boolean>` | Queued check of whether the event would commit. Runs the guard, commits nothing. |
-| `getNextEvents` | `() => TEvent[]` | Events the committed state declares, in declaration order. Synchronous, never runs a guard. |
+| `getNextEvents` | `() => TEvent[]` | Events the active configuration declares, shallowest state first. Synchronous, never runs a guard. |
+| `matches` | `(path: TState) => boolean` | True for the active leaf and every state above it; false for an undeclared path. |
 | `subscribe` | `(listener: (snapshot) => void) => () => void` | Called once per committed transition. Returns an unsubscribe function. |
 | `snapshot` | `() => MachineSnapshot` | Immutable snapshot of the committed state, with a cloned context. |
 | `restore` | `(snapshot: unknown) => Promise<MachineSnapshot>` | Validates and applies a serialized snapshot, queued behind pending events. |
@@ -1636,10 +1729,10 @@ Because a running check is pending work, `whenIdle()` waits for it.
 | Field      | Type                | Description                                                                     |
 | ---------- | ------------------- | ------------------------------------------------------------------------------- |
 | `id`       | `string`            | Machine identifier.                                                             |
-| `state`    | `TState`            | Committed state.                                                                |
+| `state`    | `TState`            | Committed state path, such as `"draft.editing"` for a nested machine.            |
 | `context`  | `TContext`          | Cloned context.                                                                 |
 | `event`    | `TEvent \| null`    | The event that produced this snapshot, or `null` when none did.                 |
-| `previous` | `TState \| null`    | The state before the transition that produced this snapshot, or `null` when no transition did. |
+| `previous` | `TState \| null`    | The state path before the transition that produced this snapshot, or `null` when no transition did. |
 | `revision` | `number`            | Committed transitions on this instance. Never restored from storage.             |
 | `done`     | `boolean`           | `true` when the current state declares no outgoing transitions.                  |
 | `schemaVersion` | `number`       | Version stamped by the machine, checked by `restore()`.                          |
@@ -1921,7 +2014,11 @@ What the compiler enforces:
 - Unknown event names are rejected at the call site.
 - `initial` and every transition target (shorthand and object form) must be a declared state.
 - Guards, actions and hooks receive the typed context, plus the state and event they are narrowed
-  to (see [Per-state narrowing](#per-state-narrowing)).
+  to (see [Per-state narrowing](#per-state-narrowing)). For a nested machine the narrowed state is
+  the full path, such as `"draft.editing"`.
+- The state union is the declared state paths, so `machine.state` and `matches(path)` accept exactly
+  the paths the definition declares. A nested machine supplies that union itself, as described in
+  [Nested states](#nested-states).
 - The context type flows into guards, actions, hooks, snapshots and subscribers.
 
 ### Per-state narrowing
@@ -2059,7 +2156,7 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 
 | Constraint | Detail |
 | --- | --- |
-| Flat machines only | No hierarchical (nested) or parallel states yet. |
+| Compound states only | Nested states work; parallel regions and history are still to come. |
 | No event payloads | Events are plain strings; payload data travels in the context. |
 | No delayed transitions or timers | There is no `after`/`delay` support and no clock injection. Schedule externally and `send()` when the time comes. |
 | No actor composition | One machine per process object; invoking child machines is on the roadmap. |
@@ -2076,8 +2173,8 @@ Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantic
 
 1. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, richer error
    taxonomy, inspection records.
-2. **Advanced states** - hierarchical and parallel states, history, internal/raised/delayed events,
-   typed event payloads.
+2. **Advanced states** - parallel states, history, internal/raised/delayed events, typed event
+   payloads.
 3. **Actors and composition** - spawned child machines, message routing, supervision.
 4. **Workflow layer** - multi-machine sagas with compensation and human tasks.
 5. **Durable execution** - stores, checkpointing, recovery, migrations.
@@ -2104,6 +2201,7 @@ The suite is organised into focused files:
 | ----------------------------- | ------------------------------------------------------------------------- |
 | `tests/creation.test.ts`      | Machine creation, definition validation, snapshot shape.                   |
 | `tests/transitions.test.ts`   | Transitions, event resolution, terminal states, self-transitions.          |
+| `tests/nested.test.ts`        | Compound states: paths, target forms, bubbling, ordering across levels, `matches()`. |
 | `tests/guards.test.ts`        | Sync/async guards, argument shape, rejection, stale-state protection.      |
 | `tests/actions.test.ts`       | Hook ordering, async hooks, failure atomicity, context updates.            |
 | `tests/inspection.test.ts`    | `can()` and `getNextEvents()`: guard evaluation, queue ordering, read-only guarantees. |
