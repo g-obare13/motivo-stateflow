@@ -465,6 +465,46 @@ describe("history definition validation", () => {
     expect((failure as Error).message).toMatch(/targets undeclared state/);
   });
 
+  it("HS3, CF4: deep memory of one region does not remember a sibling region's state", async () => {
+    const machine = createMachine({
+      id: "region-history",
+      initial: "p",
+      context: {},
+      states: {
+        p: {
+          type: "parallel",
+          on: { LEAVE: "away" },
+          states: {
+            r1: {
+              initial: "r1a",
+              states: {
+                r1a: { on: { NEXT: "r1b" } },
+                r1b: {},
+                h: { type: "history", history: "deep" },
+              },
+            },
+            r2: {
+              initial: "r2a",
+              states: { r2a: { on: { NEXT: "r2b" } }, r2b: {} },
+            },
+          },
+        },
+        away: { on: { RESUME: "p.r1.h" } },
+      },
+    });
+
+    await machine.send("NEXT");
+    expect(machine.configuration).toEqual(["p.r1.r1b", "p.r2.r2b"]);
+
+    await machine.send("LEAVE");
+    // Deep memory belongs to the region that owns the pseudo-state, not to its siblings.
+    expect(machine.snapshot().history).toEqual({ "p.r1.h": ["p.r1.r1b"] });
+
+    await machine.send("RESUME");
+
+    expect(machine.configuration).toEqual(["p.r1.r1b", "p.r2.r2a"]);
+  });
+
   it("HS5, SR7: uses the default target when the restored memory is empty", async () => {
     const machine = createMachine({
       id: "empty-memory",

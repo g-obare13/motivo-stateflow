@@ -713,6 +713,47 @@ describe("snapshot format version 2", () => {
     });
   });
 
+  it("SR7, CF4: normalises a restored configuration and memory into document order", async () => {
+    // A stored configuration and a stored memory are sets, so either may arrive in any order; what
+    // the machine reports is document order.
+    const parallel = createMachine({
+      id: "shuffled",
+      initial: "p",
+      context: {},
+      states: {
+        p: {
+          type: "parallel",
+          states: {
+            r1: { initial: "a", states: { a: {}, b: {} } },
+            r2: { initial: "c", states: { c: {}, d: {} } },
+          },
+        },
+      },
+    });
+
+    await expect(
+      parallel.restore({
+        id: "shuffled",
+        state: "p",
+        context: {},
+        configuration: ["p.r2.d", "p.r1.b"],
+        history: {},
+      }),
+    ).resolves.toMatchObject({ configuration: ["p.r1.b", "p.r2.d"] });
+
+    const history = historyMachine();
+
+    await expect(
+      history.restore({
+        id: "history-format",
+        state: "away",
+        context: {},
+        configuration: ["away"],
+        history: { "editing.hist": ["editing.sub.s1", "editing.idle"] },
+      }),
+    ).resolves.toMatchObject({ history: { "editing.hist": ["editing.idle", "editing.sub.s1"] } });
+  });
+
   it("SR6: accepts memory each pseudo-state could have recorded", async () => {
     const history = historyMachine();
 
