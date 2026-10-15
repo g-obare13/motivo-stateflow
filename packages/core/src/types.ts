@@ -195,18 +195,131 @@ export type TransitionDefinition<
   guard?: GuardFn<TContext, TSource, EventFromName<TOwnEvent, TPayloads>>;
   /** Actions executed after exit hooks and before entry hooks. */
   actions?: ReadonlyArray<ActionFn<TContext, TSource, EventFromName<TOwnEvent, TPayloads>>>;
+  /**
+   * Reserved for internal transitions, which are not supported in this version.
+   *
+   * Typed as `never` so `type: "internal"` is a compile error rather than a silently ignored
+   * field, and rejected at runtime with `UnsupportedTransitionTypeError`. Reserving the field
+   * keeps adding internal transitions later a non-breaking change.
+   */
+  type?: never;
 };
 
 /**
- * Declaration of a single state, which is either a leaf or a compound state with nested children.
+ * Shape of an atomic state: a leaf in the path tree with no child to enter and no nested states.
+ */
+type AtomicStateShape = {
+  /** Atomic states declare no child to enter. */
+  initial?: never;
+  /** Atomic states declare no nested states. */
+  states?: PathUnionRequired;
+  /** An atomic state is not parallel and not a history pseudo-state. */
+  type?: "atomic" | "compound";
+  /** Only a history pseudo-state declares `history`. */
+  history?: never;
+  /** Only a history pseudo-state declares a default target. */
+  target?: never;
+};
+
+/**
+ * Shape of a history pseudo-state: a leaf in the path tree that remembers the configuration of
+ * its parent. It is never active itself, so it declares no hooks and no transitions.
+ */
+type HistoryStateShape<TPath extends string> = {
+  /** Marks this state as a history pseudo-state. */
+  type: "history";
+  /** Depth of the memory. Defaults to `"shallow"`. */
+  history?: "shallow" | "deep";
+  /** State entered on first entry, before any memory has been recorded. */
+  target?: NoInfer<TargetName<TPath>>;
+  /** A history pseudo-state declares no child to enter. */
+  initial?: never;
+  /** A history pseudo-state declares no nested states. */
+  states?: PathUnionRequired;
+  /** A history pseudo-state declares no entry hooks. */
+  entry?: never;
+  /** A history pseudo-state declares no exit hooks. */
+  exit?: never;
+  /** A history pseudo-state declares no transitions. */
+  on?: never;
+};
+
+/**
+ * Shape of a compound state: nested states plus the single child entered by default.
+ */
+type CompoundStateShape<
+  TContext,
+  TPath extends string,
+  TEvent extends string,
+  TKey extends string,
+  TPayloads extends EventPayloadMap,
+> = {
+  /** A compound state is not parallel and not a history pseudo-state. */
+  type?: "atomic" | "compound";
+  /** Key of the child state entered when this compound state is entered. */
+  initial: ChildKeys<TPath, TKey>;
+  /** Nested states, keyed by their own name. */
+  states: {
+    [TChildKey in ChildKeys<TPath, TKey>]: StateDefinition<
+      TContext,
+      TPath,
+      TEvent,
+      `${TKey}.${TChildKey}`,
+      TPayloads
+    >;
+  };
+  /** Only a history pseudo-state declares `history`. */
+  history?: never;
+  /** Only a history pseudo-state declares a default target. */
+  target?: never;
+};
+
+/**
+ * Shape of a parallel state: every child is a region, and all of them are active together, so
+ * there is no single `initial` child.
+ */
+type ParallelStateShape<
+  TContext,
+  TPath extends string,
+  TEvent extends string,
+  TKey extends string,
+  TPayloads extends EventPayloadMap,
+> = {
+  /** Marks this state as a parallel state. */
+  type: "parallel";
+  /** Regions, keyed by their own name. Every one of them is entered with the parallel state. */
+  states: {
+    [TChildKey in ChildKeys<TPath, TKey>]: StateDefinition<
+      TContext,
+      TPath,
+      TEvent,
+      `${TKey}.${TChildKey}`,
+      TPayloads
+    >;
+  };
+  /** A parallel state has no single initial child. */
+  initial?: never;
+  /** Only a history pseudo-state declares `history`. */
+  history?: never;
+  /** Only a history pseudo-state declares a default target. */
+  target?: never;
+};
+
+/**
+ * Declaration of a single state.
+ *
+ * Four kinds exist, and the kind decides which fields are legal:
+ *
+ * - **atomic**: no `states`, no `initial`, nothing else to enter;
+ * - **compound**: declares `states` and the `initial` child that is entered by default;
+ * - **parallel**: declares `states` and `type: "parallel"`, and enters every child at once, so it
+ *   must not declare `initial`;
+ * - **history**: declares `type: "history"`, remembers its parent's configuration, and declares
+ *   neither `states` nor hooks nor transitions, because it is never active.
  *
  * Lifecycle hooks run only while the machine is inside the state that declares them, so their
  * `state` is narrowed to that single path. Their `event` stays the machine-wide union, because
  * the event that enters or leaves a state varies with the transition being taken.
- *
- * A compound state declares `initial` and `states`: entering it enters its initial child, and an
- * event no child handles bubbles up to its own `on` map. A leaf declares neither, and the compiler
- * rejects both on a leaf.
  *
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TPath - Union of every state path, top-level and nested.
@@ -238,26 +351,9 @@ export type StateDefinition<
       | TransitionDefinition<TContext, TPath, TEvent, TKey, TEventKey, TPayloads>;
   };
 } & ([ChildPaths<TPath, TKey>] extends [never]
-  ? {
-      /** Leaf states declare no child to enter. */
-      initial?: never;
-      /** Leaf states declare no nested states. */
-      states?: PathUnionRequired;
-    }
-  : {
-      /** Key of the child state entered when this compound state is entered. */
-      initial: ChildKeys<TPath, TKey>;
-      /** Nested states, keyed by their own name. */
-      states: {
-        [TChildKey in ChildKeys<TPath, TKey>]: StateDefinition<
-          TContext,
-          TPath,
-          TEvent,
-          `${TKey}.${TChildKey}`,
-          TPayloads
-        >;
-      };
-    });
+  ? AtomicStateShape | HistoryStateShape<TPath>
+  : | CompoundStateShape<TContext, TPath, TEvent, TKey, TPayloads>
+    | ParallelStateShape<TContext, TPath, TEvent, TKey, TPayloads>);
 
 /**
  * A complete machine definition.
@@ -386,6 +482,22 @@ export type MachineSnapshot<TContext, TState extends string, TEvent = string> = 
    * written by an older shape of the machine from being applied silently.
    */
   schemaVersion: number;
+  /**
+   * Every active atomic state path, in document order. This is the authoritative view of the
+   * active configuration, and it is the only field that can express a parallel state, where
+   * several states are active at once.
+   *
+   * A sequential machine holds exactly one path here, which is the same value as `state`.
+   */
+  configuration: readonly TState[];
+  /**
+   * Remembered configuration per history pseudo-state path, keyed by that pseudo-state's path.
+   *
+   * Empty for a machine that declares no history pseudo-states, and for one that has not left a
+   * state whose history is being remembered yet. Shallow history records the parent's active
+   * direct children, deep history records every active atomic descendant.
+   */
+  history: Readonly<Record<string, readonly TState[]>>;
 };
 
 /**
@@ -454,8 +566,23 @@ export type MachineOptions<TContext> = {
 export interface Machine<TContext, TState extends string, TEvent> {
   /** Machine identifier taken from the definition. */
   readonly id: string;
-  /** State committed by the most recent successful transition. */
+  /**
+   * State committed by the most recent successful transition.
+   *
+   * This is the deepest active state that contains the whole configuration: for a machine with no
+   * parallel state it is the single active leaf, and while a parallel state is active it is that
+   * parallel state, because no deeper state contains every active leaf. Use `configuration` for
+   * the individual leaves.
+   */
   readonly state: TState;
+  /**
+   * Every active atomic state path, committed by the most recent successful transition, in
+   * document order.
+   *
+   * The authoritative view of the configuration, and the only one that can express a parallel
+   * state, where several states are active at once. A sequential machine reports exactly one path.
+   */
+  readonly configuration: readonly TState[];
   /** Clone of the committed context. Mutating it never affects machine internals. */
   readonly context: TContext;
   /**
@@ -506,9 +633,11 @@ export interface Machine<TContext, TState extends string, TEvent> {
   /**
    * Reports whether the state at `path` is active.
    *
-   * True for the active leaf and for every compound state above it, so a nested machine answers
-   * both `matches("draft.editing")` and `matches("draft")` while editing a draft. False for a
-   * path the machine does not declare, the same way `can()` answers `false` for an unknown event.
+   * True for every path in the active configuration: the active leaf and every state above it, so
+   * a nested machine answers both `matches("draft.editing")` and `matches("draft")` while editing
+   * a draft. While a parallel state is active its regions match, and a leaf in one region does not
+   * make a sibling region's leaf match. A history pseudo-state is never active, so it never
+   * matches, and the compiler rejects the path outright.
    *
    * @param path - A declared state path.
    * @returns `true` when the path is part of the active configuration.
@@ -538,11 +667,14 @@ export interface Machine<TContext, TState extends string, TEvent> {
    * transition. Malformed input rejects with `SnapshotValidationError` and leaves the machine
    * untouched.
    *
-   * The snapshot's `id` and `state` are checked, the context must be a plain object of cloneable
-   * values, and the snapshot's `schemaVersion` must match the machine's (a snapshot without that
-   * field is accepted, so data written before versioning keeps working). When the machine was
-   * created with `parseContext`, that function validates and rehydrates the stored context, and
-   * an error thrown by it rejects the snapshot.
+   * The snapshot's `id` is checked, the context must be a plain object of cloneable values, and
+   * the stored format version must be one this build understands. Version `2` is the current
+   * shape and is validated field by field. Version `1`, or no version at all, is a 0.1.0 snapshot
+   * and is migrated by `migrateSnapshotV1ToV2`: its configuration becomes the single state it was
+   * in, and its history memory starts empty. Any other version rejects with
+   * `UnsupportedSnapshotVersionError`. When the machine was created with `parseContext`, that
+   * function validates and rehydrates the stored context, and an error thrown by it rejects the
+   * snapshot.
    *
    * @param snapshot - A snapshot produced by `snapshot()` or `toJSON()`.
    * @returns The restored snapshot.

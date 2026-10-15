@@ -656,3 +656,91 @@ test("infers dotted paths recursively through three nested levels", () => {
   // @ts-expect-error intermediate paths must match the actual tree
   void machine.matches("root.leaf");
 });
+
+test("TY1, TY2, TY3: infers parallel paths and keeps history out of the state union", () => {
+  const machine = createMachine({
+    id: "typed-parallel",
+    initial: "away",
+    context: { ready: false },
+    states: {
+      work: {
+        type: "parallel",
+        on: { PAUSE: "away" },
+        states: {
+          left: { initial: "l1", states: { l1: { on: { NEXT: "l2" } }, l2: {} } },
+          right: { initial: "r1", states: { r1: { on: { NEXT: "r2" } }, r2: {} } },
+          memory: { type: "history", history: "deep", target: "l1" },
+        },
+      },
+      away: { on: { RESUME: "work.memory" } },
+    },
+  });
+
+  type Path =
+    | "work"
+    | "work.left"
+    | "work.left.l1"
+    | "work.left.l2"
+    | "work.right"
+    | "work.right.r1"
+    | "work.right.r2"
+    | "away";
+
+  expectTypeOf(machine.state).toEqualTypeOf<Path>();
+  expectTypeOf(machine.configuration).toEqualTypeOf<readonly Path[]>();
+  expectTypeOf(machine.matches).parameter(0).toEqualTypeOf<Path>();
+  expectTypeOf(machine.snapshot().configuration).toEqualTypeOf<readonly Path[]>();
+  expectTypeOf(machine.snapshot().history).toEqualTypeOf<
+    Readonly<Record<string, readonly Path[]>>
+  >();
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<
+    "PAUSE" | "NEXT" | "RESUME"
+  >();
+
+  // A history pseudo-state is a legal target, and the region paths are part of the union.
+  void machine.send("RESUME");
+  void machine.matches("work.right.r2");
+
+  // @ts-expect-error a history pseudo-state is never active, so it is not a state path
+  void machine.matches("work.memory");
+
+  // @ts-expect-error a typo in a history default target is caught against the state tree
+  createMachine({
+    id: "bad-target",
+    initial: "away",
+    context: {},
+    states: {
+      work: {
+        type: "parallel",
+        states: {
+          left: { initial: "l1", states: { l1: {} } },
+          memory: { type: "history", target: "work.ghost" },
+        },
+      },
+      away: {},
+    },
+  });
+});
+
+test("TY4: rejects state declarations whose kind and fields disagree", () => {
+  // @ts-expect-error a parallel state declares no initial child
+  createMachine({ id: "x", initial: "p", context: {}, states: { p: { type: "parallel", initial: "a", states: { r: { initial: "a", states: { a: {} } } } } } });
+
+  // @ts-expect-error a parallel state needs at least one region
+  createMachine({ id: "x", initial: "p", context: {}, states: { p: { type: "parallel" } } });
+
+  // @ts-expect-error a history pseudo-state declares no transitions
+  createMachine({ id: "x", initial: "a", context: {}, states: { a: { initial: "b", states: { b: {}, h: { type: "history", on: { GO: "b" } } } } } });
+
+  // @ts-expect-error a history pseudo-state declares no nested states
+  createMachine({ id: "x", initial: "a", context: {}, states: { a: { initial: "b", states: { b: {}, h: { type: "history", states: { c: {} } } } } } });
+
+  // @ts-expect-error "sometimes" is not a history depth
+  createMachine({ id: "x", initial: "a", context: {}, states: { a: { initial: "b", states: { b: {}, h: { type: "history", history: "sometimes" } } } } });
+
+  // @ts-expect-error only the four declared state kinds exist
+  createMachine({ id: "x", initial: "a", context: {}, states: { a: { type: "compoundish" } } });
+
+  // @ts-expect-error internal transitions are not supported in this version
+  createMachine({ id: "x", initial: "a", context: {}, states: { a: { on: { GO: { target: "b", type: "internal" } } }, b: {} } });
+});

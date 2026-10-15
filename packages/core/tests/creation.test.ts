@@ -45,7 +45,9 @@ describe("createMachine", () => {
       previous: null,
       revision: 0,
       done: true,
-      schemaVersion: 1,
+      schemaVersion: 2,
+      configuration: ["pending"],
+      history: {},
     });
   });
 

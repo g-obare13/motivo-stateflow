@@ -104,7 +104,9 @@ const initial = order.snapshot();
 equal(initial.state, "idle", "initial state");
 equal(initial.revision, 0, "initial revision");
 equal(initial.done, false, "a state with outgoing transitions is not done");
-equal(initial.schemaVersion, 1, "default schema version");
+equal(initial.schemaVersion, 2, "default schema version");
+equal(initial.configuration.join(","), "idle", "the snapshot carries the configuration");
+equal(JSON.stringify(initial.history), "{}", "a machine without history reports empty memory");
 
 const delivered: string[] = [];
 const first = order.subscribe((snapshot) => delivered.push(snapshot.event ?? "none"));
@@ -190,6 +192,17 @@ ok(badContext instanceof SnapshotValidationError, "a rejected parseContext fails
 
 await order.whenIdle();
 await report.whenIdle();
+
+// A 0.1.0 snapshot carries no configuration and no history, and is migrated on restore.
+const legacy = createMachine({
+  id: "legacy",
+  initial: "open",
+  context: { source: "0.1.0" },
+  states: { open: {}, closed: {} },
+});
+await legacy.restore({ id: "legacy", state: "open", context: { source: "0.1.0" } });
+equal(legacy.snapshot().configuration.join(","), "open", "a legacy snapshot is migrated");
+equal(legacy.snapshot().history && JSON.stringify(legacy.snapshot().history), "{}", "migrated history is empty");
 `;
 
 /** The consumer compiler settings, kept strict so the published types face real scrutiny. */

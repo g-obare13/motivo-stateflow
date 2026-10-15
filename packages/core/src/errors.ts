@@ -58,6 +58,44 @@ export class MachineConfigurationError extends StateflowError {
 }
 
 /**
+ * Thrown by `createMachine()` when a transition declares a `type` field.
+ *
+ * Only external transitions are implemented, so `type: "internal"` would silently change the
+ * meaning of a definition if it were ignored. Rejecting the declaration keeps adding internal
+ * transitions later a non-breaking change and prevents silent misuse. Extends
+ * {@link MachineConfigurationError}, so existing configuration-error handling still catches it.
+ *
+ * @example
+ * ```ts
+ * createMachine({
+ *   id: "order",
+ *   initial: "pending",
+ *   context: {},
+ *   states: {
+ *     pending: { on: { GO: { target: "done", type: "internal" } } },
+ *     done: {},
+ *   },
+ * });
+ * // throws UnsupportedTransitionTypeError
+ * ```
+ */
+export class UnsupportedTransitionTypeError extends MachineConfigurationError {
+  /** The rejected `type` value, or `undefined` when the field was present but not a string. */
+  readonly receivedType: string | undefined;
+
+  /**
+   * @param message - Human readable description of the unsupported declaration.
+   * @param receivedType - The rejected `type` value, if it was a string.
+   * @param options - Standard error options; `cause` carries the underlying failure.
+   */
+  constructor(message: string, receivedType?: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "UnsupportedTransitionTypeError";
+    this.receivedType = receivedType;
+  }
+}
+
+/**
  * Thrown when an event is not declared anywhere in the machine.
  *
  * This is a programming error: the event name does not exist in any state's `on` map.
@@ -142,5 +180,46 @@ export class SnapshotValidationError extends StateflowError {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "SnapshotValidationError";
+  }
+}
+
+/** Stable machine-readable code reported by {@link UnsupportedSnapshotVersionError}. */
+export const UNSUPPORTED_SNAPSHOT_VERSION_CODE = "ERR_UNSUPPORTED_SNAPSHOT_VERSION";
+
+/** Snapshot format versions {@link migrateSnapshotV1ToV2} and `restore()` understand. */
+export const SUPPORTED_SNAPSHOT_VERSIONS: readonly number[] = [1, 2];
+
+/**
+ * Thrown by `restore()` when a snapshot declares a format version the library does not know.
+ *
+ * A version below the current one is migrated, and the current version is validated. Anything
+ * else, including a future version written by a newer release, is refused rather than applied
+ * with fields this build does not understand. Extends {@link SnapshotValidationError}, so
+ * existing snapshot-error handling still catches it.
+ */
+export class UnsupportedSnapshotVersionError extends SnapshotValidationError {
+  /** Stable code for programmatic handling, independent of the message wording. */
+  readonly code: string = UNSUPPORTED_SNAPSHOT_VERSION_CODE;
+  /** The version found in the snapshot, or `undefined` when the field was absent or not a number. */
+  readonly receivedVersion: number | undefined;
+  /** The versions this build can read. */
+  readonly supportedVersions: readonly number[];
+
+  /**
+   * @param message - Human readable description of the refused version.
+   * @param receivedVersion - The version found in the snapshot, if it was a number.
+   * @param supportedVersions - The versions this build can read.
+   * @param options - Standard error options; `cause` carries the underlying failure.
+   */
+  constructor(
+    message: string,
+    receivedVersion: number | undefined,
+    supportedVersions: readonly number[],
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "UnsupportedSnapshotVersionError";
+    this.receivedVersion = receivedVersion;
+    this.supportedVersions = supportedVersions;
   }
 }

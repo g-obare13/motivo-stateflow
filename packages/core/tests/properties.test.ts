@@ -213,3 +213,170 @@ describe("invariants", () => {
     );
   });
 });
+
+describe("parallel configurations and restoration", () => {
+  /**
+   * Two regions, one of them parallel itself, plus a deep history pseudo-state, so a generated
+   * sequence exercises selection, conflict resolution, nested configurations and memory.
+   */
+  const buildParallelMachine = () =>
+    createMachine({
+      id: "parallel-props",
+      initial: "work",
+      context: { touched: 0 },
+      states: {
+        work: {
+          type: "parallel",
+          on: { STOP: "stopped" },
+          states: {
+            alpha: {
+              initial: "a1",
+              states: { a1: { on: { NEXT_A: "a2" } }, a2: { on: { NEXT_A: "a1" } } },
+            },
+            beta: {
+              type: "parallel",
+              states: {
+                inner: { initial: "b1", states: { b1: { on: { NEXT_B: "b2" } }, b2: {} } },
+                other: { initial: "c1", states: { c1: { on: { NEXT_C: "c2" } }, c2: {} } },
+              },
+            },
+            memory: { type: "history", history: "deep" },
+          },
+        },
+        stopped: { on: { RESUME: "work.memory", RESTART: "work" } },
+      },
+    });
+
+  const PARALLEL_EVENTS = [
+    "NEXT_A",
+    "NEXT_B",
+    "NEXT_C",
+    "STOP",
+    "RESUME",
+    "RESTART",
+    "ABSENT",
+  ] as const;
+
+  type ParallelEvent = (typeof PARALLEL_EVENTS)[number];
+
+  /** The events every generated sequence is drawn from, including one the machine never declares. */
+  const isDeclared = (event: string): boolean => event !== "ABSENT";
+
+  const parallelSequence = () => fc.array(fc.constantFrom(...PARALLEL_EVENTS), { maxLength: 18 });
+
+  /** Applies a sequence, swallowing rejections, which are part of the generated input space. */
+  const applyParallelSequence = async (
+    machine: ReturnType<typeof buildParallelMachine>,
+    events: readonly string[],
+  ): Promise<void> => {
+    for (const event of events) {
+      if (!isDeclared(event)) {
+        // Deliberately undeclared, so it can only be submitted through the untyped entry point.
+        await machine.send(asEvent<never>(event)).catch(() => undefined);
+        continue;
+      }
+      try {
+        await machine.send(asEvent<DeclaredEvent>(event));
+      } catch {
+        // Rejected events are expected.
+      }
+    }
+  };
+
+  /** The events the machine actually declares, used where a real submission must type-check. */
+  type DeclaredEvent = Exclude<ParallelEvent, "ABSENT">;
+
+  /** Runs one event and reports the outcome, so two machines can be compared. */
+  const settle = async (
+    machine: ReturnType<typeof buildParallelMachine>,
+    event: DeclaredEvent,
+  ): Promise<unknown> => {
+    try {
+      const snapshot = await machine.send(asEvent<DeclaredEvent>(event));
+      return {
+        state: snapshot.state,
+        configuration: [...snapshot.configuration],
+        context: snapshot.context,
+      };
+    } catch (error) {
+      return { rejected: (error as Error).name };
+    }
+  };
+
+  it("always keeps the active configuration legal and consistently reported", async () => {
+    await fc.assert(
+      fc.asyncProperty(parallelSequence(), async (events) => {
+        const machine = buildParallelMachine();
+        await applyParallelSequence(machine, events);
+
+        const configuration = [...machine.configuration];
+
+        // Exactly one top-level state is active, and no leaf is reported twice.
+        expect(configuration.length).toBeGreaterThan(0);
+        expect(new Set(configuration).size).toBe(configuration.length);
+
+        // Every reported leaf is an atomic state of the machine, and every active parallel state
+        // has all of its regions active.
+        for (const path of configuration) {
+          expect(machine.matches(path)).toBe(true);
+        }
+        if (machine.matches("work")) {
+          expect(configuration).toHaveLength(3);
+          expect(configuration.every((path) => path.startsWith("work."))).toBe(true);
+        } else {
+          expect(configuration).toEqual(["stopped"]);
+        }
+
+        // `state` is the deepest active state containing the whole configuration.
+        expect(machine.state).toBe(configuration.length === 1 ? configuration[0] : "work");
+
+        // The snapshot agrees with the machine, and the reachable events follow the configuration:
+        // `STOP` is declared on the parallel state, which is active whenever `work` is.
+        const snapshot = machine.snapshot();
+        expect(snapshot.configuration).toEqual(configuration);
+        for (const path of configuration) {
+          expect(machine.matches(path)).toBe(true);
+        }
+
+        if (machine.matches("work")) {
+          expect(machine.getNextEvents()).toContain("STOP");
+          expect(machine.getNextEvents()).not.toContain("ABSENT");
+          expect(new Set(machine.getNextEvents()).size).toBe(machine.getNextEvents().length);
+          await expect(machine.can("STOP")).resolves.toBe(true);
+        } else {
+          expect(machine.getNextEvents()).toEqual(["RESUME", "RESTART"]);
+        }
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it("restores a serialized snapshot into an indistinguishable machine", async () => {
+    await fc.assert(
+      fc.asyncProperty(parallelSequence(), async (events) => {
+        const original = buildParallelMachine();
+        await applyParallelSequence(original, events);
+
+        const resumed = buildParallelMachine();
+        await resumed.restore(JSON.parse(JSON.stringify(original)));
+
+        expect([...resumed.configuration]).toEqual([...original.configuration]);
+        expect(resumed.context).toEqual(original.context);
+        expect(resumed.snapshot().done).toBe(original.snapshot().done);
+        expect(resumed.snapshot().history).toEqual(original.snapshot().history);
+        expect(resumed.getNextEvents()).toEqual(original.getNextEvents());
+        expect(resumed.snapshot().configuration).toEqual(original.snapshot().configuration);
+
+        // The restored machine answers the next event exactly as the original does.
+        for (const probe of ["NEXT_A", "NEXT_B", "NEXT_C", "STOP", "RESUME"] as const) {
+          const left = buildParallelMachine();
+          const right = buildParallelMachine();
+          await left.restore(JSON.parse(JSON.stringify(original)));
+          await right.restore(JSON.parse(JSON.stringify(original)));
+          expect(await settle(right, probe)).toEqual(await settle(left, probe));
+        }
+      }),
+      { numRuns: NUM_RUNS },
+    );
+  });
+});

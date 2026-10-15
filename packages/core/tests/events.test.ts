@@ -132,3 +132,23 @@ describe("event payloads", () => {
     );
   });
 });
+
+describe("unclonable event payloads", () => {
+  it("rejects an event that cannot be cloned, without changing the machine", async () => {
+    const machine = createMachine({
+      id: "unclonable-event",
+      initial: "idle",
+      context: {},
+      states: { idle: { on: { GO: "done" } }, done: {} },
+    });
+
+    await expect(
+      machine.send({ type: "GO", handler: () => undefined } as never),
+    ).rejects.toThrow(/not structured-cloneable/);
+    expect(machine.state).toBe("idle");
+
+    await expect(machine.can({ type: "GO", handler: () => undefined } as never)).rejects.toThrow(
+      /not structured-cloneable/,
+    );
+  });
+});
