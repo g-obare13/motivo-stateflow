@@ -39,6 +39,7 @@ const docMachine = () => {
         exit: [() => log.push("exit draft")],
         on: {
           RESET: {
+            target: "draft",
             actions: [() => log.push("reset")],
           },
           ESCALATE: {

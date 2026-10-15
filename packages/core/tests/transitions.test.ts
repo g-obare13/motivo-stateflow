@@ -183,14 +183,20 @@ describe("self transitions", () => {
     ]);
   });
 
-  it("treats a transition without a target as a self transition", async () => {
+  it("runs the actions of a transition without a target without leaving the state", async () => {
     const action = vi.fn();
+    const entered = vi.fn();
+    const exited = vi.fn();
     const machine = createMachine({
       id: "counter",
       initial: "counting",
       context: {},
       states: {
-        counting: { on: { TICK: { actions: [action] } } },
+        counting: {
+          entry: [entered],
+          exit: [exited],
+          on: { TICK: { actions: [action] } },
+        },
       },
     });
 
@@ -199,6 +205,10 @@ describe("self transitions", () => {
     expect(action).toHaveBeenCalledTimes(1);
     expect(machine.state).toBe("counting");
     expect(machine.snapshot().revision).toBe(1);
+    // SCXML gives a targetless transition an empty exit set and an empty entry set, so no lifecycle
+    // hook runs. A transition that should re-enter its declaring state declares `target` explicitly.
+    expect(entered).not.toHaveBeenCalled();
+    expect(exited).not.toHaveBeenCalled();
   });
 });
 

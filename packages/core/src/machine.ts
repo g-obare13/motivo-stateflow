@@ -237,13 +237,16 @@ type FlexibleStateDefinition<
 };
 
 /**
- * A transition after normalization: the target is resolved eagerly and every hook list is copied
- * into a local array, so later mutation of the caller's definition cannot change the behaviour of a
- * running machine.
+ * A transition after normalization: the target is resolved eagerly, `null` when the declaration
+ * omitted it, and every hook list is copied into a local array, so later mutation of the caller's
+ * definition cannot change the behaviour of a running machine.
+ *
+ * A targetless transition has an empty exit set and an empty entry set, so it runs its guard and
+ * its actions while the configuration stays as it was.
  */
 type CompiledTransition<TContext> = {
-  /** Declared target, or the declaring state itself when the declaration omitted it. */
-  target: CompiledNode<TContext>;
+  /** Declared target, or `null` for a targetless transition, which neither exits nor enters. */
+  target: CompiledNode<TContext> | null;
   /** Guard returning `false` leaves this transition out of the microstep. */
   guard?: GuardFn<TContext, string, unknown>;
   actions?: Array<ActionFn<TContext, string, unknown>>;
@@ -624,13 +627,17 @@ export function createMachine<TContext extends object>(
   };
 
   /**
-   * The active states one candidate exits: the proper descendants of its domain.
+   * The active states one candidate exits: the proper descendants of its domain, or nothing at all
+   * for a targetless transition, which has no domain to compute because it has no target.
    */
   const exitSetFor = (
     source: CompiledState<TContext>,
     targets: Array<CompiledState<TContext>>,
   ): Set<CompiledState<TContext>> => {
     const exiting = new Set<CompiledState<TContext>>();
+    if (targets.length === 0) {
+      return exiting;
+    }
     const domain = leastCommonCompoundAncestor([source, ...targets]);
     for (const state of activeStates) {
       if (isDescendantOf(state, domain)) {
@@ -847,6 +854,9 @@ export function createMachine<TContext extends object>(
     memory: Map<string, Array<CompiledState<TContext>>>,
   ): Array<CompiledState<TContext>> => {
     const target = transition.target;
+    if (target === null) {
+      return [];
+    }
     if (target.kind !== "history") {
       return [target];
     }
@@ -1810,10 +1820,8 @@ const assertStateType = (
 /**
  * Validates one raw transition declaration and resolves its target.
  *
- * Omitting `target` produces an external self-transition, which exits and re-enters the declaring
- * state: a compound state therefore resets to its initial child, and a region of a parallel state
- * resets the whole parallel subtree because parallel states are not compound and so can never be
- * the least common compound ancestor of a region and itself.
+ * Omitting `target` produces a targetless transition: its guard and its actions run, nothing is
+ * exited and nothing is entered, and the active configuration is unchanged (`SEMANTICS.md` TL1).
  *
  * A `type` field is rejected rather than ignored, because only external transitions are
  * implemented and silently reading `internal` as `external` would change what a definition means.
@@ -1838,7 +1846,7 @@ const normalizeTransition = <TContext>(
 
   if (transition.type !== undefined) {
     throw new UnsupportedTransitionTypeError(
-      `${prefix} declares "type": ${describe(transition.type)}, but internal transitions are not supported in this version. Remove the field; a transition with no "target" is an external self-transition that re-enters its declaring state.`,
+      `${prefix} declares "type": ${describe(transition.type)}, but internal transitions are not supported in this version. Remove the field; a transition with no "target" runs its guard and actions without exiting or entering anything.`,
       typeof transition.type === "string" ? transition.type : undefined,
     );
   }
@@ -1846,7 +1854,7 @@ const normalizeTransition = <TContext>(
   const normalized: CompiledTransition<TContext> = {
     target:
       transition.target === undefined
-        ? source
+        ? null
         : resolveTarget(machineId, root, source, transition.target, prefix),
   };
 

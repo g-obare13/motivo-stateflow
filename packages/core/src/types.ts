@@ -153,9 +153,8 @@ type RelativeTargets<TPath extends string> = TPath extends `${string}.${string}`
 type TargetName<TPath extends string> = TPath | BareTargets<TPath> | RelativeTargets<TPath>;
 
 /**
- * Object form of a transition. `target` defaults to the current state, which produces a
- * self-transition: exit hooks, transition actions and entry hooks all run, and the state name
- * itself does not change.
+ * Object form of a transition. Omitting `target` declares a targetless transition: the guard and
+ * the actions run, nothing is exited or entered, and the active configuration does not change.
  *
  * A transition is written inside the state that declares it, so its guard and actions receive
  * that state as `state` and the full typed event value declared for that transition as `event`.
@@ -185,7 +184,8 @@ export type TransitionDefinition<
    * - a relative path with a leading dot, such as `".reviewing"`, which starts at the declaring
    *   state's own children.
    *
-   * Defaults to the current state (self-transition). The `NoInfer` wrapper keeps the full path
+   * Omit to declare a targetless transition: its guard and actions run, and the configuration is
+   * unchanged. The `NoInfer` wrapper keeps the full path
    * union out of type inference: `TPath` must come from the state map keys, otherwise a target
    * that happens to be mentioned here would narrow the union and every other declared state would
    * be rejected.
