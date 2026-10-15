@@ -1,0 +1,77 @@
+{
+  "capturedWith": "motivo-stateflow 0.1.0 dist build at commit 5017a0c",
+  "note": "Real 0.1.0 output. Snapshots predate configuration and history, so schemaVersion is 1.",
+  "machines": {
+    "order": {
+      "snapshots": {
+        "initial": {
+          "id": "order",
+          "state": "draft.editing",
+          "context": {
+            "orderId": "order_123",
+            "approved": false
+          },
+          "event": null,
+          "previous": null,
+          "revision": 0,
+          "done": false,
+          "schemaVersion": 1
+        },
+        "afterSubmit": {
+          "id": "order",
+          "state": "draft.reviewing",
+          "context": {
+            "orderId": "order_123",
+            "approved": false
+          },
+          "event": "SUBMIT",
+          "previous": "draft.editing",
+          "revision": 1,
+          "done": false,
+          "schemaVersion": 1
+        },
+        "afterPublish": {
+          "id": "order",
+          "state": "published",
+          "context": {
+            "orderId": "order_123",
+            "approved": false
+          },
+          "event": "PUBLISH",
+          "previous": "draft.reviewing",
+          "revision": 2,
+          "done": true,
+          "schemaVersion": 1
+        }
+      }
+    },
+    "flat": {
+      "snapshots": {
+        "initial": {
+          "id": "flat",
+          "state": "idle",
+          "context": {
+            "count": 0
+          },
+          "event": null,
+          "previous": null,
+          "revision": 0,
+          "done": false,
+          "schemaVersion": 1
+        },
+        "afterStart": {
+          "id": "flat",
+          "state": "running",
+          "context": {
+            "count": 0
+          },
+          "event": "START",
+          "previous": "idle",
+          "revision": 1,
+          "done": false,
+          "schemaVersion": 1
+        }
+      }
+    }
+  }
+}
