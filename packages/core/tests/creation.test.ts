@@ -7,8 +7,17 @@
 import { describe, expect, it } from "vitest";
 import {
   createMachine,
+  GuardRejectedError,
+  InvalidEventError,
+  InvalidTransitionError,
   MachineConfigurationError,
+  QueueOverflowError,
   SnapshotValidationError,
+  StateflowError,
+  SUPPORTED_SNAPSHOT_VERSIONS,
+  UnsupportedSnapshotVersionError,
+  UnsupportedTransitionTypeError,
+  UNSUPPORTED_SNAPSHOT_VERSION_CODE,
 } from "../src/index.js";
 import { createLooseMachine } from "./helpers.js";
 
@@ -228,5 +237,34 @@ describe("definition validation", () => {
 
     await expect(machine.restore(null)).rejects.toBeInstanceOf(SnapshotValidationError);
     await expect(machine.restore(null)).rejects.not.toBeInstanceOf(MachineConfigurationError);
+  });
+
+  it("names every error class, so logs and stack traces identify the failure", () => {
+    // The `name` field is part of the published surface, so it is asserted literally.
+    const errors: Array<[Error, string]> = [
+      [new StateflowError("message"), "StateflowError"],
+      [new MachineConfigurationError("message"), "MachineConfigurationError"],
+      [new UnsupportedTransitionTypeError("message"), "UnsupportedTransitionTypeError"],
+      [new InvalidEventError("message"), "InvalidEventError"],
+      [new InvalidTransitionError("message"), "InvalidTransitionError"],
+      [new GuardRejectedError("message"), "GuardRejectedError"],
+      [new QueueOverflowError("message"), "QueueOverflowError"],
+      [new SnapshotValidationError("message"), "SnapshotValidationError"],
+      [
+        new UnsupportedSnapshotVersionError("message", 9, SUPPORTED_SNAPSHOT_VERSIONS),
+        "UnsupportedSnapshotVersionError",
+      ],
+    ];
+
+    for (const [error, name] of errors) {
+      expect(error, name).toHaveProperty("name", name);
+      expect(error, name).toBeInstanceOf(StateflowError);
+    }
+  });
+
+  it("publishes a literal version code and the versions it reads", () => {
+    // Asserting the literal keeps the code stable for consumers that switch on it.
+    expect(UNSUPPORTED_SNAPSHOT_VERSION_CODE).toBe("ERR_UNSUPPORTED_SNAPSHOT_VERSION");
+    expect(SUPPORTED_SNAPSHOT_VERSIONS).toEqual([1, 2]);
   });
 });
