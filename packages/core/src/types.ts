@@ -1,12 +1,51 @@
 /**
  * Public types of Motivo Stateflow.
  *
- * The types in this module drive inference for `createMachine()`. State names, event names and
- * the context shape are inferred from the definition, so the compiler rejects unknown events,
- * unknown states and invalid transition targets wherever that is statically knowable.
+ * The types in this module drive inference for `createMachine()`. State paths, event names, event
+ * payloads and context shape are inferred from the definition, so the compiler rejects unknown
+ * events, invalid payloads and invalid transition targets wherever that is statically knowable.
  *
  * @packageDocumentation
  */
+
+/**
+ * Compile-time declaration of event payload shapes.
+ *
+ * Map each event name to its payload object, or to `undefined` for a payload-free event. The
+ * machine uses the keys from its transition maps to determine which declared events it accepts.
+ */
+export type EventPayloadMap = Record<string, object | undefined>;
+
+/**
+ * Literal event names explicitly provided by an event payload map.
+ */
+export type EventPayloadNames<TPayloads extends EventPayloadMap> = string extends keyof TPayloads
+  ? never
+  : keyof TPayloads & string;
+
+/**
+ * Event value accepted for one declared event name.
+ *
+ * Payload-free events keep their string shorthand. Events with payloads use a discriminated
+ * object so their name and payload travel together.
+ */
+export type EventFromName<
+  TName extends string,
+  TPayloads extends EventPayloadMap = Record<never, never>,
+> = TName extends keyof TPayloads
+  ? TPayloads[TName] extends object
+    ? { type: TName } & TPayloads[TName]
+    : TName
+  : TName;
+
+/**
+ * Event names represented by an event union.
+ */
+export type EventNameOf<TEvent> = TEvent extends string
+  ? TEvent
+  : TEvent extends { type: infer TName extends string }
+    ? TName
+    : never;
 
 /**
  * Context and metadata passed to guards, transition actions and lifecycle hooks.
@@ -19,7 +58,7 @@
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  */
-export type GuardContext<TContext, TState extends string, TEvent extends string> = {
+export type GuardContext<TContext, TState extends string, TEvent> = {
   /** Staged context for the pending transition. */
   context: TContext;
   /** State the machine is transitioning from, or the target state for entry hooks. */
@@ -36,7 +75,7 @@ export type GuardContext<TContext, TState extends string, TEvent extends string>
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  */
-export type GuardFn<TContext, TState extends string, TEvent extends string> = (
+export type GuardFn<TContext, TState extends string, TEvent> = (
   args: GuardContext<TContext, TState, TEvent>,
 ) => boolean | Promise<boolean>;
 
@@ -48,7 +87,7 @@ export type GuardFn<TContext, TState extends string, TEvent extends string> = (
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  */
-export type ActionFn<TContext, TState extends string, TEvent extends string> = (
+export type ActionFn<TContext, TState extends string, TEvent> = (
   args: GuardContext<TContext, TState, TEvent>,
 ) => unknown | Promise<unknown>;
 
@@ -119,9 +158,9 @@ type TargetName<TPath extends string> = TPath | BareTargets<TPath> | RelativeTar
  * itself does not change.
  *
  * A transition is written inside the state that declares it, so its guard and actions receive
- * that state as `state` and the event they are declared under as `event`. Both are narrowed from
- * the machine-wide unions, so a guard cannot compare `state` against a state it is not declared
- * in, and cannot read an event the state does not declare.
+ * that state as `state` and the full typed event value declared for that transition as `event`.
+ * Both are narrowed from the machine-wide unions, so a guard cannot compare `state` against a
+ * state it is not declared in, and cannot read an event the state does not declare.
  *
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TPath - Union of every state path, top-level and nested.
@@ -135,6 +174,7 @@ export type TransitionDefinition<
   TEvent extends string,
   TSource extends string = TPath,
   TOwnEvent extends TEvent = TEvent,
+  TPayloads extends EventPayloadMap = Record<never, never>,
 > = {
   /**
    * Declared state path to enter, in one of three forms:
@@ -152,9 +192,9 @@ export type TransitionDefinition<
    */
   target?: NoInfer<TargetName<TPath>>;
   /** Condition that must return `true` for the transition to be committed. */
-  guard?: GuardFn<TContext, TSource, TOwnEvent>;
+  guard?: GuardFn<TContext, TSource, EventFromName<TOwnEvent, TPayloads>>;
   /** Actions executed after exit hooks and before entry hooks. */
-  actions?: ReadonlyArray<ActionFn<TContext, TSource, TOwnEvent>>;
+  actions?: ReadonlyArray<ActionFn<TContext, TSource, EventFromName<TOwnEvent, TPayloads>>>;
 };
 
 /**
@@ -178,11 +218,12 @@ export type StateDefinition<
   TPath extends string,
   TEvent extends string,
   TKey extends string = TPath,
+  TPayloads extends EventPayloadMap = Record<never, never>,
 > = {
   /** Hooks executed when the state is entered, after transition actions. */
-  entry?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<TEvent>>>;
+  entry?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<EventFromName<TEvent, TPayloads>>>>;
   /** Hooks executed when the state is left, before transition actions. */
-  exit?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<TEvent>>>;
+  exit?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<EventFromName<TEvent, TPayloads>>>>;
   /**
    * Event map for the state. A string value is shorthand for `{ target: value }`. A key that is
    * not declared here is not part of the machine's event union, so it cannot be sent.
@@ -194,7 +235,7 @@ export type StateDefinition<
   on?: {
     [TEventKey in TEvent]?:
       | NoInfer<TargetName<TPath>>
-      | TransitionDefinition<TContext, TPath, TEvent, TKey, TEventKey>;
+      | TransitionDefinition<TContext, TPath, TEvent, TKey, TEventKey, TPayloads>;
   };
 } & ([ChildPaths<TPath, TKey>] extends [never]
   ? {
@@ -212,7 +253,8 @@ export type StateDefinition<
           TContext,
           TPath,
           TEvent,
-          `${TKey}.${TChildKey}`
+          `${TKey}.${TChildKey}`,
+          TPayloads
         >;
       };
     });
@@ -220,9 +262,9 @@ export type StateDefinition<
 /**
  * A complete machine definition.
  *
- * `states` is keyed by state name, and it is the single source of the state union: every key
- * becomes part of `TState`, even a state that no transition targets (an entry-only or planned
- * state). `initial` and the transition targets are checked against the union of state paths.
+ * `states` is keyed by state name, and it is the single source of the state union: every key and
+ * nested path becomes part of the state union, even a state that no transition targets. `initial`
+ * and transition targets are checked against the union of state paths.
  *
  * Hook and action lists accept mutable and readonly arrays alike, so a definition held in a
  * `const` variable as `as const` or checked with `satisfies` is a valid input.
@@ -230,15 +272,16 @@ export type StateDefinition<
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TState - Union of top-level state names, the keys of `states`.
  * @typeParam TEvent - Union of declared event names.
- * @typeParam TPath - Union of every state path, including nested ones. Defaults to `TState`, which
- * is correct for a flat machine; a machine with nested states must supply the union, because
- * TypeScript cannot infer a recursive structure from the definition alone.
+ * @typeParam TPath - Union of every state path, including nested ones. `createMachine()` derives
+ * this recursively from its `states` map. This parameter remains available for explicit type
+ * annotations.
  */
 export type MachineDefinition<
   TContext,
   TState extends string,
   TEvent extends string,
   TPath extends string = TState,
+  TPayloads extends EventPayloadMap = Record<never, never>,
 > = {
   /** Stable machine identifier, echoed in snapshots and error messages. */
   id: string;
@@ -252,20 +295,37 @@ export type MachineDefinition<
   /** Initial context. Must be a plain object and structured-cloneable. */
   context: TContext;
   /**
+   * Optional event payload declarations. Use `undefined` for payload-free events; object types
+   * produce event objects shaped as `{ type: "EVENT_NAME", ...payload }`.
+   *
+   * ```ts
+   * events: {} as { ADD: { amount: number }; RESET: undefined }
+   * ```
+   */
+  events?: TPayloads;
+  /**
    * Declared states. Every transition target must be a key of this object.
    *
    * The mapped form feeds each key into its own state definition, which is what narrows the
    * `state` and `event` a hook, guard or action receives. It is also the inference source for
    * `TState`, so the state union is exactly the declared keys.
    */
-  states: { [TKey in TState]: StateDefinition<TContext, TPath, TEvent, TKey> };
+  states: {
+    [TKey in TState]: StateDefinition<
+      TContext,
+      TPath,
+      TEvent | EventPayloadNames<TPayloads>,
+      TKey,
+      TPayloads
+    >;
+  };
 };
 
 /**
- * Definition shape for a machine with nested states, taking the full path union once.
+ * Explicitly annotated definition shape for a machine with nested states.
  *
- * The top-level keys are derived from the union, so a nested machine is written against a single
- * extra type argument:
+ * The top-level keys are derived from the supplied path union. Inline calls to `createMachine()`
+ * infer paths recursively and do not need this helper:
  *
  * ```ts
  * type OrderPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
@@ -294,7 +354,8 @@ export type NestedMachineDefinition<
   TContext,
   TPath extends string,
   TEvent extends string,
-> = MachineDefinition<TContext, TopLevelPaths<TPath>, TEvent, TPath>;
+  TPayloads extends EventPayloadMap = Record<never, never>,
+> = MachineDefinition<TContext, TopLevelPaths<TPath>, TEvent, TPath, TPayloads>;
 
 /**
  * An immutable snapshot of a machine at a point in time.
@@ -303,7 +364,7 @@ export type NestedMachineDefinition<
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  */
-export type MachineSnapshot<TContext, TState extends string, TEvent extends string = string> = {
+export type MachineSnapshot<TContext, TState extends string, TEvent = string> = {
   /** Machine identifier. */
   id: string;
   /** State committed at the time the snapshot was taken. */
@@ -316,7 +377,7 @@ export type MachineSnapshot<TContext, TState extends string, TEvent extends stri
   previous: TState | null;
   /** Number of transitions committed by this instance; never restored from a serialized snapshot. */
   revision: number;
-  /** `true` when the current state declares no outgoing transitions. */
+  /** `true` when no state in the active configuration declares an outgoing transition. */
   done: boolean;
   /**
    * Version of the snapshot format, taken from the machine's `schemaVersion` option.
@@ -334,7 +395,7 @@ export type MachineSnapshot<TContext, TState extends string, TEvent extends stri
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  */
-export type Subscription<TContext, TState extends string, TEvent extends string> = (
+export type Subscription<TContext, TState extends string, TEvent> = (
   snapshot: MachineSnapshot<TContext, TState, TEvent>,
 ) => void;
 
@@ -390,7 +451,7 @@ export type MachineOptions<TContext> = {
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  */
-export interface Machine<TContext, TState extends string, TEvent extends string> {
+export interface Machine<TContext, TState extends string, TEvent> {
   /** Machine identifier taken from the definition. */
   readonly id: string;
   /** State committed by the most recent successful transition. */
@@ -405,7 +466,7 @@ export interface Machine<TContext, TState extends string, TEvent extends string>
    * transition fails and resolves with the committed snapshot otherwise. A failure never blocks
    * later events.
    *
-   * @param event - A declared event name.
+   * @param event - A declared payload-free event name or typed event object.
    * @returns The snapshot committed by this transition.
    */
   send(event: TEvent): Promise<MachineSnapshot<TContext, TState, TEvent>>;
@@ -428,20 +489,20 @@ export interface Machine<TContext, TState extends string, TEvent extends string>
    * Guards observe a staging clone of the context, as they do during a transition, so a guard
    * that writes to the context it receives cannot reach the machine from here.
    *
-   * @param event - Event name to test against the committed state.
+   * @param event - Payload-free event name or typed event object to test.
    * @returns `true` when the transition would commit, `false` when it would not.
    */
   can(event: TEvent): Promise<boolean>;
   /**
-   * Lists the events the committed state declares, in declaration order.
+   * Lists the event names the committed state declares, in declaration order.
    *
    * The answer is structural: it reports which events the state accepts and never evaluates
    * guards, which is what `can()` is for. Like `snapshot()`, it reads the committed state without
    * waiting for queued events. A terminal state declares no events and returns an empty array.
    *
-   * @returns A fresh array of event names; mutating it affects nothing.
+   * @returns A fresh array of event names (the `type` discriminators for payload events).
    */
-  getNextEvents(): TEvent[];
+  getNextEvents(): EventNameOf<TEvent>[];
   /**
    * Reports whether the state at `path` is active.
    *

@@ -1,7 +1,7 @@
 {
   "name": "motivo-stateflow-workspace",
   "private": true,
-  "description": "Workspace for Motivo Stateflow: state machines, workflows and reliable execution.",
+  "description": "Workspace for Motivo Stateflow, a typed TypeScript state machine engine.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.33.2",
@@ -9,6 +9,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "changeset": "changeset",
     "build": "pnpm -r --if-present run build",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -19,6 +20,7 @@
     "check": "pnpm run lint && pnpm run test && pnpm run test:coverage && pnpm run build && pnpm run smoke && pnpm run test:consumer"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@eslint/js": "^9.32.0",
     "@typescript-eslint/eslint-plugin": "^8.71.2",
     "@typescript-eslint/parser": "^8.71.2",

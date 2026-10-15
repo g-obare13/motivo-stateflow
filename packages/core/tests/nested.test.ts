@@ -2,8 +2,7 @@
  * Nested (compound) states: state paths, target resolution, event bubbling, lifecycle ordering
  * across levels, `matches()`, and the snapshot and restore rules for paths.
  *
- * Machines here pass the full path union as explicit type arguments, because TypeScript cannot
- * infer a recursive structure from a definition literal.
+ * Runtime tests cover nested semantics. Typed path inference is verified in `types.test-d.ts`.
  */
 
 import { describe, expect, it } from "vitest";

@@ -18,6 +18,10 @@ import {
 } from "./errors.js";
 import type {
   ActionFn,
+  EventFromName,
+  EventNameOf,
+  EventPayloadMap,
+  EventPayloadNames,
   GuardContext,
   GuardFn,
   Machine,
@@ -25,8 +29,144 @@ import type {
   MachineOptions,
   MachineSnapshot,
   Subscription,
+  TransitionDefinition,
   Unsubscribe,
 } from "./types.js";
+
+type StatePathUnion<TStates, TPrefix extends string = ""> = {
+  [TKey in keyof TStates & string]:
+    | `${TPrefix}${TKey}`
+    | (TStates[TKey] extends { states: infer TChildren }
+        ? StatePathUnion<TChildren, `${TPrefix}${TKey}.`>
+        : never);
+}[keyof TStates & string];
+
+type BareTargetNames<TPath extends string> = TPath extends `${string}.${infer TRest}`
+  ? BareTargetNames<TRest>
+  : TPath;
+
+type AllowedTargetNames<TPath extends string> =
+  | TPath
+  | BareTargetNames<TPath>
+  | (TPath extends `${string}.${string}` ? `.${string}` : never);
+
+type DeclaredTargets<TState> = TState extends { on: infer TOn }
+  ? {
+      [TEvent in keyof TOn]: TOn[TEvent] extends string
+        ? TOn[TEvent]
+        : TOn[TEvent] extends { target: infer TTarget }
+          ? TTarget
+          : never;
+    }[keyof TOn]
+  : never;
+
+type StateEventNames<TStates> = {
+  [TKey in keyof TStates]: TStates[TKey] extends { on: infer TOn }
+    ? keyof TOn & string
+    : never;
+}[keyof TStates] | {
+  [TKey in keyof TStates]: TStates[TKey] extends {
+    states: infer TChildren extends Record<string, unknown>;
+  }
+    ? StateEventNames<TChildren>
+    : never;
+}[keyof TStates];
+
+type InvalidTargets<TStates, TPath extends string> = {
+  [TKey in keyof TStates]: TStates[TKey] extends { states: infer TChildren }
+    ? InvalidTargets<TChildren, TPath>
+    : never;
+}[keyof TStates] | {
+  [TKey in keyof TStates]: DeclaredTargets<TStates[TKey]> extends infer TTarget
+    ? TTarget extends string
+      ? TTarget extends AllowedTargetNames<TPath>
+        ? never
+        : TTarget
+      : never
+    : never;
+}[keyof TStates];
+
+type ValidateTargets<TStates, TPath extends string> =
+  [InvalidTargets<TStates, TPath>] extends [never]
+    ? unknown
+    : { __invalid_transition_target__: InvalidTargets<TStates, TPath> };
+
+type NestedStateMap<TState> = TState extends {
+  states: infer TChildren extends Record<string, unknown>;
+}
+  ? TChildren
+: Record<never, never>;
+
+type InvalidStateTree<TStates> = {
+  [TKey in keyof TStates]: TStates[TKey] extends {
+    states: infer TChildren extends Record<string, unknown>;
+  }
+    ? TStates[TKey] extends { initial: infer TInitial extends string }
+      ? TInitial extends keyof TChildren
+        ? InvalidStateTree<TChildren>
+        : `${TKey & string}.initial`
+      : `${TKey & string}.initial`
+    : TStates[TKey] extends { initial: unknown }
+      ? TKey
+      : never;
+}[keyof TStates];
+
+type ValidateStateTree<TStates> = [InvalidStateTree<TStates>] extends [never]
+  ? unknown
+  : { __invalid_compound_state__: InvalidStateTree<TStates> };
+
+type InferredMachineDefinition<
+  TContext,
+  TState extends string,
+  TEvent extends string,
+  TStates extends Record<string, unknown>,
+  TPayloads extends EventPayloadMap,
+> = {
+  id: string;
+  initial: NoInfer<TState>;
+  context: TContext;
+  events?: TPayloads;
+  states: TStates & {
+    [TKey in TState]: FlexibleStateDefinition<
+      TContext,
+      TEvent | EventPayloadNames<TPayloads>,
+      TPayloads,
+      TKey,
+      NestedStateMap<TStates[TKey]>
+    >;
+  };
+};
+
+type FlexibleStateDefinition<
+  TContext,
+  TEvent extends string,
+  TPayloads extends EventPayloadMap,
+  TKey extends string,
+  TChildren extends Record<string, unknown> = Record<never, never>,
+> = {
+  entry?: ReadonlyArray<ActionFn<TContext, TKey, EventFromName<TEvent, TPayloads>>>;
+  exit?: ReadonlyArray<ActionFn<TContext, TKey, EventFromName<TEvent, TPayloads>>>;
+  on?: {
+    [TEventKey in TEvent]?: TransitionDefinition<
+      TContext,
+      string,
+      TEvent,
+      TKey,
+      TEventKey,
+      TPayloads
+    > | string;
+  };
+  initial?: string;
+  states?: TChildren & {
+    [TChild in keyof TChildren & string]: FlexibleStateDefinition<
+      TContext,
+      TEvent,
+      TPayloads,
+      `${TKey}.${TChild}`,
+      NestedStateMap<TChildren[TChild]>
+    >;
+  };
+};
 
 /**
  * A transition after normalization: the target state is resolved eagerly and every hook list is
@@ -35,8 +175,8 @@ import type {
  */
 type CompiledTransition<TContext> = {
   target: CompiledState<TContext>;
-  guard?: GuardFn<TContext, string, string>;
-  actions?: Array<ActionFn<TContext, string, string>>;
+  guard?: GuardFn<TContext, string, unknown>;
+  actions?: Array<ActionFn<TContext, string, unknown>>;
 };
 
 /**
@@ -60,8 +200,8 @@ type CompiledState<TContext> = {
   children: Map<string, CompiledState<TContext>>;
   /** Child entered when this state is entered. Absent for a leaf. */
   initialChild?: CompiledState<TContext>;
-  entry: Array<ActionFn<TContext, string, string>>;
-  exit: Array<ActionFn<TContext, string, string>>;
+  entry: Array<ActionFn<TContext, string, unknown>>;
+  exit: Array<ActionFn<TContext, string, unknown>>;
   transitions: Map<string, CompiledTransition<TContext>>;
 };
 
@@ -69,7 +209,7 @@ type CompiledState<TContext> = {
  * A single `subscribe()` call. Subscriptions are tracked per call instead of per function, so
  * subscribing the same function twice can be undone one subscription at a time.
  */
-type ListenerRecord<TContext, TState extends string, TEvent extends string> = {
+type ListenerRecord<TContext, TState extends string, TEvent> = {
   listener: Subscription<TContext, TState, TEvent>;
 };
 
@@ -109,11 +249,57 @@ export function createMachine<
   TContext extends object,
   TState extends string,
   TEvent extends string,
-  TPath extends string = TState,
+  TPayloads extends EventPayloadMap = Record<never, never>,
 >(
-  definition: MachineDefinition<TContext, TState, TEvent, TPath>,
+  definition: MachineDefinition<TContext, TState, TEvent, TState, TPayloads>,
+  options?: MachineOptions<TContext>,
+): Machine<
+  TContext,
+  TState,
+  EventFromName<TEvent | EventPayloadNames<TPayloads>, TPayloads>
+>;
+// eslint-disable-next-line no-redeclare
+export function createMachine<
+  TContext extends object,
+  TState extends string,
+  const TStates extends Record<string, unknown>,
+  TPayloads extends EventPayloadMap = Record<never, never>,
+  TEvent extends string = StateEventNames<TStates>,
+>(
+  definition: InferredMachineDefinition<
+    TContext,
+    TState,
+    TEvent,
+    TStates,
+    TPayloads
+  > &
+    ValidateTargets<NoInfer<TStates>, StatePathUnion<NoInfer<TStates>>> &
+    ValidateStateTree<NoInfer<TStates>>,
+  options?: MachineOptions<TContext>,
+): Machine<
+  TContext,
+  StatePathUnion<TStates>,
+  EventFromName<TEvent | EventPayloadNames<TPayloads>, TPayloads>
+>;
+/**
+ * Compatibility overload for explicitly annotated machine definitions.
+ */
+// eslint-disable-next-line no-redeclare
+export function createMachine<
+  TContext extends object,
+  TState extends string,
+  TEvent extends string,
+  TPath extends string = TState,
+  TPayloads extends EventPayloadMap = Record<never, never>,
+>(
+  definition: MachineDefinition<TContext, TState, TEvent, TPath, TPayloads>,
+  options?: MachineOptions<TContext>,
+): Machine<TContext, TPath, EventFromName<TEvent | EventPayloadNames<TPayloads>, TPayloads>>;
+// eslint-disable-next-line no-redeclare
+export function createMachine<TContext extends object>(
+  definition: unknown,
   options: MachineOptions<TContext> = {},
-): Machine<TContext, TPath, TEvent> {
+): unknown {
   const raw = definition as unknown as {
     id?: unknown;
     initial?: unknown;
@@ -194,7 +380,9 @@ export function createMachine<
   let queueTail: Promise<void> = Promise.resolve();
   let pending = 0;
   const idleWaiters = new Set<() => void>();
-  const listeners = new Set<ListenerRecord<TContext, TPath, TEvent>>();
+  type TMachineEvent = unknown;
+  type TMachinePath = string;
+  const listeners = new Set<ListenerRecord<TContext, TMachinePath, TMachineEvent>>();
 
   const finishQueuedTask = (): void => {
     pending -= 1;
@@ -318,31 +506,32 @@ export function createMachine<
   const buildSnapshot = (
     state: CompiledState<TContext>,
     context: TContext,
-    event: TEvent | null,
+    event: TMachineEvent | null,
     previous: CompiledState<TContext> | null,
-  ): MachineSnapshot<TContext, TPath, TEvent> => ({
+  ): MachineSnapshot<TContext, TMachinePath, TMachineEvent> => ({
     id: machineId,
-    state: state.path as TPath,
+    state: state.path as TMachinePath,
     context,
-    event,
-    previous: previous === null ? null : (previous.path as TPath),
+    event: event === null ? null : cloneEvent(event, machineId),
+    previous: previous === null ? null : (previous.path as TMachinePath),
     revision,
     done: isDone(state),
     schemaVersion,
   });
 
-  const snapshot = (): MachineSnapshot<TContext, TPath, TEvent> =>
+  const snapshot = (): MachineSnapshot<TContext, TMachinePath, TMachineEvent> =>
     buildSnapshot(currentState, cloneContext(currentContext), null, null);
 
   const notify = (
     committedContext: TContext,
-    committed: MachineSnapshot<TContext, TPath, TEvent>,
+    committed: MachineSnapshot<TContext, TMachinePath, TMachineEvent>,
   ): void => {
     for (const record of [...listeners]) {
       try {
         record.listener({
           ...committed,
           context: cloneContext(committedContext),
+          event: committed.event === null ? null : cloneEvent(committed.event, machineId),
         });
       } catch {
         // A misbehaving subscriber must never corrupt machine state or stall the queue.
@@ -350,13 +539,21 @@ export function createMachine<
     }
   };
 
-  const normaliseEvent = (event: TEvent): string => {
-    if (typeof event !== "string") {
+  const normaliseEvent = (event: TMachineEvent): string => {
+    if (typeof event === "string") {
+      return event;
+    }
+    if (!isPlainObject(event) || typeof event.type !== "string") {
       throw new InvalidEventError(
-        `Machine "${machineId}" can only process string events, received ${describe(event)}.`,
+        `Machine "${machineId}" can only process event names or event objects with a string "type", received ${describe(event)}.`,
       );
     }
-    return event;
+    return event.type;
+  };
+
+  const prepareEvent = (event: TMachineEvent): TMachineEvent => {
+    normaliseEvent(event);
+    return cloneEvent(event, machineId);
   };
 
   /**
@@ -393,8 +590,8 @@ export function createMachine<
   };
 
   const execute = async (
-    actions: Array<ActionFn<TContext, string, string>>,
-    args: GuardContext<TContext, string, string>,
+    actions: Array<ActionFn<TContext, string, unknown>>,
+    args: GuardContext<TContext, string, unknown>,
   ): Promise<void> => {
     for (const action of actions) {
       await action(args);
@@ -407,12 +604,14 @@ export function createMachine<
    * them succeed. A failed transition is therefore a no-op for observers: no snapshot, no
    * notification.
    */
-  const runTransition = async (event: TEvent): Promise<MachineSnapshot<TContext, TPath, TEvent>> => {
+  const runTransition = async (
+    event: TMachineEvent,
+  ): Promise<MachineSnapshot<TContext, TMachinePath, TMachineEvent>> => {
     const eventName = normaliseEvent(event);
     const previousState = currentState;
     const { source, transition } = resolveTransition(eventName);
     const stagedContext = cloneContext(currentContext);
-    const args: GuardContext<TContext, string, string> = {
+    const args: GuardContext<TContext, string, unknown> = {
       context: stagedContext,
       state: source.path,
       event,
@@ -463,23 +662,34 @@ export function createMachine<
     get id(): string {
       return machineId;
     },
-    get state(): TPath {
-      return currentState.path as TPath;
+    get state(): TMachinePath {
+      return currentState.path as TMachinePath;
     },
     get context(): TContext {
       return cloneContext(currentContext);
     },
-    send(event: TEvent): Promise<MachineSnapshot<TContext, TPath, TEvent>> {
-      return enqueue(() => runTransition(event));
+    send(event: TMachineEvent): Promise<MachineSnapshot<TContext, TMachinePath, TMachineEvent>> {
+      try {
+        const preparedEvent = prepareEvent(event);
+        return enqueue(() => runTransition(preparedEvent));
+      } catch (error) {
+        return Promise.reject(error);
+      }
     },
     /**
      * Reports whether the event would be accepted, queued behind pending events. The guard runs
      * against a staging clone and nothing is committed: no hooks, no notification, no revision
      * change. See {@link Machine.can} for the full contract.
      */
-    can(event: TEvent): Promise<boolean> {
+    can(event: TMachineEvent): Promise<boolean> {
+      let preparedEvent: TMachineEvent;
+      try {
+        preparedEvent = prepareEvent(event);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       return enqueue(async () => {
-        const eventName = normaliseEvent(event);
+        const eventName = normaliseEvent(preparedEvent);
         const found = findTransition(eventName);
         if (!found) {
           return false;
@@ -491,7 +701,7 @@ export function createMachine<
           await found.transition.guard({
             context: cloneContext(currentContext),
             state: found.source.path,
-            event,
+            event: preparedEvent,
           }),
         );
       });
@@ -500,42 +710,42 @@ export function createMachine<
      * Declared events of the active configuration, shallowest state first and in declaration
      * order within a state. Guards are not evaluated.
      */
-    getNextEvents(): TEvent[] {
-      const events: TEvent[] = [];
+    getNextEvents(): EventNameOf<TMachineEvent>[] {
+      const events: EventNameOf<TMachineEvent>[] = [];
       const seen = new Set<string>();
       for (const state of chainOf(currentState).reverse()) {
         for (const eventName of state.transitions.keys()) {
           if (!seen.has(eventName)) {
             seen.add(eventName);
-            events.push(eventName as TEvent);
+            events.push(eventName as EventNameOf<TMachineEvent>);
           }
         }
       }
       return events;
     },
     /** True for the active leaf and every state above it; false for an undeclared path. */
-    matches(path: TPath): boolean {
+    matches(path: TMachinePath): boolean {
       return chainOf(currentState).some((state) => state.path === path);
     },
-    subscribe(listener: Subscription<TContext, TPath, TEvent>): Unsubscribe {
+    subscribe(listener: Subscription<TContext, TMachinePath, TMachineEvent>): Unsubscribe {
       if (typeof listener !== "function") {
         throw new TypeError(`Machine "${machineId}" subscribe() expects a function listener.`);
       }
-      const record: ListenerRecord<TContext, TPath, TEvent> = { listener };
+      const record: ListenerRecord<TContext, TMachinePath, TMachineEvent> = { listener };
       listeners.add(record);
       return () => {
         listeners.delete(record);
       };
     },
     snapshot,
-    toJSON(): MachineSnapshot<TContext, TPath, TEvent> {
+    toJSON(): MachineSnapshot<TContext, TMachinePath, TMachineEvent> {
       return snapshot();
     },
     /**
      * Restores a validated snapshot. Restoration is queued behind pending events, runs no
      * lifecycle hooks and notifies no subscribers because it is not a transition.
      */
-    restore(input: unknown): Promise<MachineSnapshot<TContext, TPath, TEvent>> {
+    restore(input: unknown): Promise<MachineSnapshot<TContext, TMachinePath, TMachineEvent>> {
       return enqueue(() => {
         const candidate = assertPlainObject(
           input,
@@ -663,6 +873,18 @@ const cloneContext = <T>(value: T, onFailure?: () => never): T => {
   }
 };
 
+/** Clones an event payload so guards, hooks, snapshots and listeners share no caller-owned data. */
+const cloneEvent = <TEvent>(event: TEvent, machineId: string): TEvent => {
+  if (typeof event === "string") {
+    return event;
+  }
+  return cloneContext(event, () => {
+    throw new MachineConfigurationError(
+      `Machine "${machineId}" received an event that is not structured-cloneable.`,
+    );
+  });
+};
+
 const assertPlainObject = (
   value: unknown,
   message: string,
@@ -763,11 +985,11 @@ const compileTree = <TContext>(
         key,
         parent,
         children: new Map<string, CompiledState<TContext>>(),
-        entry: assertActionList<ActionFn<TContext, string, string>>(
+        entry: assertActionList<ActionFn<TContext, string, unknown>>(
           definition.entry,
           `State "${path}" of machine "${machineId}" has an invalid "entry" hook: expected an array of functions.`,
         ),
-        exit: assertActionList<ActionFn<TContext, string, string>>(
+        exit: assertActionList<ActionFn<TContext, string, unknown>>(
           definition.exit,
           `State "${path}" of machine "${machineId}" has an invalid "exit" hook: expected an array of functions.`,
         ),
@@ -862,10 +1084,10 @@ const normalizeTransition = <TContext>(
     if (typeof transition.guard !== "function") {
       throw new MachineConfigurationError(`${prefix} has an invalid "guard": expected a function.`);
     }
-    normalized.guard = transition.guard as GuardFn<TContext, string, string>;
+    normalized.guard = transition.guard as GuardFn<TContext, string, unknown>;
   }
 
-  const actions = assertActionList<ActionFn<TContext, string, string>>(
+  const actions = assertActionList<ActionFn<TContext, string, unknown>>(
     transition.actions,
     `${prefix} has an invalid "actions" list: expected an array of functions.`,
   );

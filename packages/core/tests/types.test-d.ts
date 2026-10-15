@@ -8,7 +8,7 @@
 
 import { expectTypeOf, test } from "vitest";
 import { createMachine } from "../src/index.js";
-import type { MachineDefinition, MachineSnapshot, NestedMachineDefinition } from "../src/index.js";
+import type { MachineDefinition, MachineSnapshot } from "../src/index.js";
 
 type OrderContext = { orderId: string; paymentAuthorized: boolean };
 type OrderState = "pending" | "confirmed" | "processing" | "shipped";
@@ -257,13 +257,11 @@ test("validates initial and every target form against the declared states", () =
   // @ts-expect-error "ghost" is not a declared state
   createMachine({ id: "x", initial: "a", context: {}, states: { a: { on: { GO: "ghost" } } } });
 
-  // The object form is validated too. The directive sits on the line TypeScript reports the
-  // error on, so it survives formatting of the surrounding call.
+  // @ts-expect-error "ghost" is not a declared state
   createMachine({
     id: "x",
     initial: "a",
     context: {},
-    // @ts-expect-error "ghost" is not a declared state
     states: { a: { on: { GO: { target: "ghost" } } } },
   });
 });
@@ -487,15 +485,12 @@ test("types can() and getNextEvents()", () => {
   void orderMachine.matches("ghost");
 });
 
-test("types a nested machine through NestedMachineDefinition", () => {
-  type DocPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
-  type DocEvent = "SUBMIT" | "BACK" | "DISCARD";
-  type DocContext = { paymentAuthorized: boolean };
-
-  const definition: NestedMachineDefinition<DocContext, DocPath, DocEvent> = {
+test("infers nested paths and narrows nested transition arguments", () => {
+  const machine = createMachine({
     id: "doc",
     initial: "draft",
     context: { paymentAuthorized: false },
+    events: { SUBMIT: undefined, BACK: undefined, DISCARD: undefined },
     states: {
       draft: {
         initial: "editing",
@@ -524,37 +519,140 @@ test("types a nested machine through NestedMachineDefinition", () => {
       },
       published: {},
     },
-  };
+  });
 
-  const machine = createMachine(definition);
-
-  // The machine reports paths, so nested states are part of the state union.
+  type DocPath = "draft" | "draft.editing" | "draft.reviewing" | "published";
+  type DocEvent = "SUBMIT" | "BACK" | "DISCARD";
   expectTypeOf(machine.state).toEqualTypeOf<DocPath>();
   expectTypeOf(machine.matches).parameter(0).toEqualTypeOf<DocPath>();
   expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<DocEvent>();
   expectTypeOf(machine.snapshot().previous).toEqualTypeOf<DocPath | null>();
 
-  // Typed so the test can ask about a path the machine does not declare.
-  void machine.matches("draft.ghost" as DocPath);
+  // @ts-expect-error undeclared nested paths are rejected
+  void machine.matches("draft.ghost");
 
-  const badInitial: NestedMachineDefinition<DocContext, DocPath, DocEvent> = {
-    id: "doc",
-    // @ts-expect-error the machine's initial state is a top-level state, not a path into one
-    initial: "draft.editing",
-    context: { paymentAuthorized: false },
-    states: {
-      draft: { initial: "editing", states: { editing: {}, reviewing: {} } },
-      published: {},
-    },
-  };
-  void badInitial;
+  // @ts-expect-error the machine's initial state is top-level, not a nested path
+  createMachine({ id: "doc", initial: "draft.editing", context: {}, states: { draft: {} } });
 
-  const missingChildren: NestedMachineDefinition<DocContext, DocPath, DocEvent> = {
+  // @ts-expect-error a compound state needs an initial child
+  createMachine({
     id: "doc",
     initial: "draft",
-    context: { paymentAuthorized: false },
-    // @ts-expect-error a compound state must declare its children
-    states: { draft: { on: { DISCARD: "published" } }, published: {} },
+    context: {},
+    states: { draft: { states: { editing: {} } } },
+  });
+});
+
+test("infers typed event payloads and keeps payload-free string events", () => {
+  type Payloads = {
+    ADD: { amount: number };
+    RESET: undefined;
   };
-  void missingChildren;
+  type AddEvent = { type: "ADD" } & Payloads["ADD"];
+  type Event = AddEvent | "RESET";
+
+  const machine = createMachine({
+    id: "payload-counter",
+    initial: "counting",
+    context: { count: 0 },
+    events: {} as Payloads,
+    states: {
+      counting: {
+        entry: [
+          ({ event }) => {
+            expectTypeOf(event).toEqualTypeOf<Event>();
+          },
+        ],
+        on: {
+          ADD: {
+            target: "counting",
+            guard: ({ event }) => event.amount > 0,
+            actions: [
+              ({ context, event }) => {
+                context.count += event.amount;
+                expectTypeOf(event).toEqualTypeOf<AddEvent>();
+              },
+            ],
+          },
+          RESET: {
+            actions: [({ context, event }) => {
+              context.count = 0;
+              expectTypeOf(event).toEqualTypeOf<"RESET">();
+            }],
+          },
+        },
+      },
+    },
+  });
+
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<Event>();
+  expectTypeOf(machine.snapshot().event).toEqualTypeOf<Event | null>();
+  expectTypeOf(machine.getNextEvents()).toEqualTypeOf<Array<"ADD" | "RESET">>();
+  expectTypeOf<Parameters<typeof machine.subscribe>[0]>().parameter(0).toEqualTypeOf<
+    MachineSnapshot<{ count: number }, "counting", Event>
+  >();
+
+  void machine.send({ type: "ADD", amount: 2 });
+  void machine.send("RESET");
+  void machine.can({ type: "ADD", amount: 1 });
+
+  // @ts-expect-error payload events require their object form
+  void machine.send("ADD");
+  // @ts-expect-error payload event is missing its required amount
+  void machine.send({ type: "ADD" });
+  // @ts-expect-error payload values must match their declared shape
+  void machine.send({ type: "ADD", amount: "two" });
+  // @ts-expect-error no-payload events use their string shorthand
+  void machine.send({ type: "RESET" });
+  // @ts-expect-error unknown event names are rejected
+  void machine.send({ type: "UNKNOWN" });
+  // @ts-expect-error unknown payload-free event names are rejected
+  void machine.send("UNKNOWN");
+});
+
+test("infers dotted paths recursively through three nested levels", () => {
+  const machine = createMachine({
+    id: "deeply-nested",
+    initial: "root",
+    context: {},
+    events: { FINISH: {} as { result: number } },
+    states: {
+      root: {
+        initial: "middle",
+        states: {
+          middle: {
+            initial: "leaf",
+            states: {
+              leaf: {
+                on: {
+                  FINISH: {
+                    target: "done",
+                    guard: ({ event }) => event.result > 0,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      done: {},
+    },
+  });
+
+  type DeepPath = "root" | "root.middle" | "root.middle.leaf" | "done";
+  expectTypeOf(machine.state).toEqualTypeOf<DeepPath>();
+  expectTypeOf(machine.matches).parameter(0).toEqualTypeOf<DeepPath>();
+  expectTypeOf(machine.snapshot().state).toEqualTypeOf<DeepPath>();
+  expectTypeOf(machine.snapshot().previous).toEqualTypeOf<DeepPath | null>();
+  expectTypeOf<Awaited<ReturnType<typeof machine.restore>>["state"]>().toEqualTypeOf<DeepPath>();
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<
+    { type: "FINISH" } & { result: number }
+  >();
+
+  void machine.matches("root.middle.leaf");
+  void machine.send({ type: "FINISH", result: 1 });
+  // @ts-expect-error unknown nested paths are rejected
+  void machine.matches("root.middle.missing");
+  // @ts-expect-error intermediate paths must match the actual tree
+  void machine.matches("root.leaf");
 });
