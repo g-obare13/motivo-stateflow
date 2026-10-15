@@ -8,6 +8,10 @@ coverage
 # Packaging artefacts
 *.tgz
 
+# Mutation testing artefacts
+reports
+.stryker-tmp
+
 # Editor and OS files
 .DS_Store
 
