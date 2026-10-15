@@ -235,6 +235,18 @@ export type MachineOptions<TContext> = {
    * @returns A valid context for the machine.
    */
   parseContext?: (input: unknown) => TContext;
+  /**
+   * Caps how many submissions may be queued at once.
+   *
+   * Every submission that queues work counts: `send()`, `can()` and `restore()`, including the
+   * one currently running. A submission that arrives while the queue is already at the limit is
+   * refused with a `QueueOverflowError` instead of being queued, so a burst of events fails fast
+   * rather than growing without bound. Awaiting the queued work, or `whenIdle()`, makes room for
+   * the next submission.
+   *
+   * Defaults to `Infinity`, which leaves the queue unbounded.
+   */
+  maxQueueDepth?: number;
 };
 
 /**

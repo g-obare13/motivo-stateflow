@@ -108,6 +108,25 @@ export class GuardRejectedError extends StateflowError {
 }
 
 /**
+ * Thrown when a submission is refused because the machine's queue is already at the depth set by
+ * the `maxQueueDepth` option.
+ *
+ * A refused submission is never queued, so it reaches no guard and no hook, and the machine keeps
+ * its state, its context and its revision. Awaiting the queued work, or `whenIdle()`, makes room
+ * for the next submission.
+ */
+export class QueueOverflowError extends StateflowError {
+  /**
+   * @param message - Human readable description of the refused submission.
+   * @param options - Standard error options; `cause` carries the underlying failure.
+   */
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "QueueOverflowError";
+  }
+}
+
+/**
  * Thrown by `restore()` when a serialized snapshot is malformed.
  *
  * Raised for non-object input, a mismatched machine id, an undeclared state name, a missing or

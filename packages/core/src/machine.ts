@@ -13,6 +13,7 @@ import {
   InvalidEventError,
   InvalidTransitionError,
   MachineConfigurationError,
+  QueueOverflowError,
   SnapshotValidationError,
 } from "./errors.js";
 import type {
@@ -132,7 +133,11 @@ export function createMachine<TContext extends object, TState extends string, TE
     }
   }
 
-  const rawOptions = options as unknown as { schemaVersion?: unknown; parseContext?: unknown };
+  const rawOptions = options as unknown as {
+    schemaVersion?: unknown;
+    parseContext?: unknown;
+    maxQueueDepth?: unknown;
+  };
   if (
     rawOptions.schemaVersion !== undefined &&
     (typeof rawOptions.schemaVersion !== "number" ||
@@ -148,8 +153,20 @@ export function createMachine<TContext extends object, TState extends string, TE
       `Machine "${machineId}" option "parseContext" must be a function.`,
     );
   }
+  if (
+    rawOptions.maxQueueDepth !== undefined &&
+    (typeof rawOptions.maxQueueDepth !== "number" ||
+      !Number.isSafeInteger(rawOptions.maxQueueDepth) ||
+      rawOptions.maxQueueDepth < 1)
+  ) {
+    throw new MachineConfigurationError(
+      `Machine "${machineId}" option "maxQueueDepth" must be a positive integer.`,
+    );
+  }
   const schemaVersion = (rawOptions.schemaVersion as number | undefined) ?? 1;
   const parseContext = rawOptions.parseContext as ((input: unknown) => TContext) | undefined;
+  const maxQueueDepth =
+    (rawOptions.maxQueueDepth as number | undefined) ?? Number.POSITIVE_INFINITY;
 
   let currentState = initialState;
   let currentContext: TContext = cloneContext(raw.context as TContext, () => {
@@ -178,8 +195,19 @@ export function createMachine<TContext extends object, TState extends string, TE
    * Appends a task to the FIFO queue. The task starts only after every previously submitted task
    * has settled, and a failing task never poisons the queue: the tail promise always resolves so
    * later tasks still run, while the caller still receives the original failure.
+   *
+   * This is the single entry point for everything that queues work, which is what makes the
+   * `maxQueueDepth` cap cover `send()`, `can()` and `restore()` alike. A task that arrives at the
+   * cap is refused outright: it is not queued, so it takes no turn and holds no slot.
    */
   const enqueue = <T>(task: () => T | Promise<T>): Promise<T> => {
+    if (pending >= maxQueueDepth) {
+      return Promise.reject(
+        new QueueOverflowError(
+          `Machine "${machineId}" refused a submission: ${pending} submissions are already queued, which is its maxQueueDepth of ${maxQueueDepth}. Await the queued work, or whenIdle(), before submitting more.`,
+        ),
+      );
+    }
     pending += 1;
     const result = queueTail.then(task);
     queueTail = result.then(finishQueuedTask, finishQueuedTask);

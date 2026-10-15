@@ -345,6 +345,11 @@ test("types the machine options", () => {
 
   // @ts-expect-error schemaVersion is a number
   createMachine(definition, { schemaVersion: "2" });
+
+  createMachine(definition, { maxQueueDepth: 4 });
+
+  // @ts-expect-error maxQueueDepth is a number
+  createMachine(definition, { maxQueueDepth: "4" });
 });
 
 test("narrows the state and event a transition is declared under", () => {

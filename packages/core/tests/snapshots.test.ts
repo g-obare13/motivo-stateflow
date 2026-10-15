@@ -277,7 +277,20 @@ describe("snapshot schema version", () => {
     expect(() => createLooseMachine(definition, { parseContext: "nope" as never })).toThrow(
       MachineConfigurationError,
     );
+    expect(() => createLooseMachine(definition, { maxQueueDepth: 0 })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { maxQueueDepth: -1 })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { maxQueueDepth: 2.5 })).toThrow(
+      MachineConfigurationError,
+    );
+    expect(() => createLooseMachine(definition, { maxQueueDepth: "2" as never })).toThrow(
+      MachineConfigurationError,
+    );
     expect(() => createLooseMachine(definition, { schemaVersion: 3 })).not.toThrow();
+    expect(() => createLooseMachine(definition, { maxQueueDepth: 1 })).not.toThrow();
   });
 });
 

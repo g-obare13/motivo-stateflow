@@ -31,12 +31,13 @@ verified as available before publication.
 - Guards (sync or async), transition actions, and entry and exit hooks, with atomic commits: a
   failure anywhere in a transition changes nothing.
 - Deterministic processing. Events are queued per machine and processed in submission order, so
-  concurrent `send()` calls never commit against stale state.
+  concurrent `send()` calls never commit against stale state. `maxQueueDepth` caps how much work may
+  be queued at once, so a burst fails fast instead of accumulating.
 - Snapshots, subscriptions and validated restoration, including a `schemaVersion` check and an
   optional `parseContext` validator for contexts that JSON cannot represent.
 - Inspection without side effects: `getNextEvents()` lists what the committed state accepts, and
   `can(event)` reports whether a transition would commit while committing nothing.
-- 165 runtime tests and 24 compile-time tests, including property-based invariants, coverage
+- 170 runtime tests and 24 compile-time tests, including property-based invariants, coverage
   thresholds over the engine source, and consumer verification across TypeScript 5.4, 5.9 and 7.0.
   CI runs on Linux and Windows on Node 22, 24 and 26.
 

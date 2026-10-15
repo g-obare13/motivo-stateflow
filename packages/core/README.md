@@ -354,7 +354,7 @@ That is the whole core surface. Everything below goes deeper into patterns, use 
 | **Entry / exit hooks** | Arrays of actions run when a state is entered or left, in declaration order. |
 | **Context** | The typed data attached to the machine. Deep cloned at every public boundary, so it behaves immutably from the outside. |
 | **Snapshot** | An immutable view: `id`, `state`, `context`, `event`, `previous`, `revision`, `done`. |
-| **Queue** | The per-machine FIFO that serializes events. Guarantees no stale-state commits and no interleaved hooks. |
+| **Queue** | The per-machine FIFO that serializes events. Guarantees no stale-state commits and no interleaved hooks. Its depth can be capped with the `maxQueueDepth` option. |
 | **Inspection** | Read-only views of the machine: `getNextEvents()` lists what the committed state declares, and `can(event)` reports whether a transition would commit without committing it. |
 | **Revision** | Monotonic counter of committed transitions on that instance. Failed transitions do not increment it. |
 
@@ -1467,6 +1467,7 @@ Returns a machine. The definition is validated eagerly: a malformed definition t
 | --- | --- | --- |
 | `schemaVersion` | `number` (default `1`) | Stamped into every snapshot and checked by `restore()`. Bump it when the context shape or transition graph changes, and old snapshots are rejected instead of applied silently. |
 | `parseContext` | `(input: unknown) => TContext` | Validates and rehydrates a restored context. Must return a valid context or throw; a throw rejects the snapshot with the original error on `cause`. |
+| `maxQueueDepth` | `number` (default `Infinity`) | Caps how many submissions may be queued at once. Must be a positive integer. Every submission that queues work counts, including the one currently running; a submission that arrives at the cap is refused with `QueueOverflowError` instead of being queued. |
 
 ```ts
 import { createMachine } from "motivo-stateflow";
@@ -1657,6 +1658,7 @@ them, so `event` and `previous` are filled in. Snapshots from `machine.snapshot(
 | `InvalidEventError` | The event is declared nowhere in the machine. |
 | `InvalidTransitionError` | The event is declared but not accepted in the current state. |
 | `GuardRejectedError` | A guard returned `false`. |
+| `QueueOverflowError` | A submission arrived while the queue was already at `maxQueueDepth`. |
 | `SnapshotValidationError` | `restore()` received a malformed snapshot. |
 
 ---
@@ -1703,7 +1705,8 @@ Two consequences worth knowing:
 
 - Events are processed **FIFO**, in submission order, per machine instance.
 - Events submitted while another event is processing are **queued**, not rejected or dropped.
-- The queue is unbounded; use `whenIdle()` to wait for it to drain.
+- The queue is unbounded unless `maxQueueDepth` is set, and `whenIdle()` waits for it to drain (see
+  [Queue depth and backpressure](#queue-depth-and-backpressure)).
 - A rejected event rejects **only its own caller's promise**. The queue is never poisoned, and later
   events - including the same event submitted again - still run.
 - Each transition commits before the next queued event runs, so guards and hooks always observe the
@@ -1713,6 +1716,58 @@ Two consequences worth knowing:
 
 A `send()` whose promise nobody awaits is safe (it will not crash the process), but its failure is
 then silent. Await it, or subscribe/inspect to observe outcomes.
+
+### Queue depth and backpressure
+
+The queue is unbounded by default, so a burst of submissions is accepted and processed in order. A
+machine that must not accumulate work can cap it:
+
+```ts
+import { QueueOverflowError, createMachine } from "motivo-stateflow";
+
+const machine = createMachine(
+  {
+    id: "ingest",
+    initial: "open",
+    context: { accepted: 0 },
+    states: {
+      open: {
+        on: {
+          PUSH: {
+            actions: [
+              ({ context }) => {
+                context.accepted += 1;
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
+  { maxQueueDepth: 2 },
+);
+
+machine.send("PUSH"); // queued
+machine.send("PUSH"); // queued
+
+try {
+  await machine.send("PUSH"); // refused: two submissions are already queued
+} catch (error) {
+  if (error instanceof QueueOverflowError) {
+    await machine.whenIdle(); // drained, so there is room again
+    await machine.send("PUSH");
+  }
+}
+
+console.log(machine.context.accepted); // 3
+```
+
+The cap counts every submission that queues work - `send()`, `can()` and `restore()` - including the
+one currently running, so `maxQueueDepth: 1` means one submission in flight.
+
+A refused submission fails fast. It is not queued, so it takes no turn, reaches no guard and no hook,
+and changes nothing; the submissions already queued still run, in order. Waiting for room is the
+caller's job: `whenIdle()` resolves once the queue has drained, which is exactly when a slot is free.
 
 ### Context
 
@@ -2009,7 +2064,7 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 | No delayed transitions or timers | There is no `after`/`delay` support and no clock injection. Schedule externally and `send()` when the time comes. |
 | No actor composition | One machine per process object; invoking child machines is on the roadmap. |
 | No durable execution | Snapshots can be persisted and restored, but there is no checkpointing, lease/ownership, or recovery loop. |
-| Unbounded queue | The internal queue has no depth limit or backpressure; `whenIdle()` is the only queue control. |
+| Unbounded queue by default | The queue grows without limit unless `maxQueueDepth` is set. There is no signal when the queue is getting deep; `whenIdle()` is the only queue control. |
 | Guards run in `can()` | `can()` evaluates the guard to answer, so side effects inside a guard are observable during a check. The machine itself is never modified. |
 | Context must be plain and cloneable | `Date`, `Map` and `Set` survive cloning, but class instances lose their prototype and accessor properties are evaluated once at creation. Keep domain behaviour outside the context. |
 | Serialization is JSON-shaped | Non-JSON values (`bigint`, cyclic structures) make `JSON.stringify` throw, and `restore()` validates shape rather than your context's TypeScript type. Pass a `parseContext` option to validate and rehydrate the stored context; without it, a value of the wrong type can still be restored. `schemaVersion` rejects snapshots written by a different version of the machine. |
@@ -2019,8 +2074,8 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 
 Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantics intact:
 
-1. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, queue governance,
-   richer error taxonomy, inspection records.
+1. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, richer error
+   taxonomy, inspection records.
 2. **Advanced states** - hierarchical and parallel states, history, internal/raised/delayed events,
    typed event payloads.
 3. **Actors and composition** - spawned child machines, message routing, supervision.
@@ -2052,7 +2107,7 @@ The suite is organised into focused files:
 | `tests/guards.test.ts`        | Sync/async guards, argument shape, rejection, stale-state protection.      |
 | `tests/actions.test.ts`       | Hook ordering, async hooks, failure atomicity, context updates.            |
 | `tests/inspection.test.ts`    | `can()` and `getNextEvents()`: guard evaluation, queue ordering, read-only guarantees. |
-| `tests/concurrency.test.ts`   | FIFO ordering, queue recovery, `whenIdle()`, notification ordering.        |
+| `tests/concurrency.test.ts`   | FIFO ordering, queue recovery, `whenIdle()`, queue depth, notification ordering. |
 | `tests/subscriptions.test.ts` | Notification timing, unsubscription, subscriber isolation.                |
 | `tests/snapshots.test.ts`     | Serialization, restoration validation, immutability, queued restoration.   |
 | `tests/isolation.test.ts`     | Instance isolation, nested context, unusual identifiers, resilience.       |

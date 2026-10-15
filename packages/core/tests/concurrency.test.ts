@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { createMachine } from "../src/index.js";
+import { QueueOverflowError, createMachine } from "../src/index.js";
 import { asEvent, deferred } from "./helpers.js";
 
 const toggleMachine = () =>
@@ -243,5 +243,113 @@ describe("notification ordering", () => {
     await Promise.all([machine.send("GO"), machine.send("NEXT")]);
 
     expect(order).toEqual(["action", "notify", "action-2", "notify"]);
+  });
+});
+
+describe("queue depth", () => {
+  /**
+   * A machine whose only event is gated: every submission stays pending until the gate settles,
+   * which lets a test hold the queue open and observe the depth exactly.
+   */
+  const gatedMachine = (maxQueueDepth: number) => {
+    const gate = deferred<boolean>();
+    const machine = createMachine(
+      {
+        id: "gated",
+        initial: "idle",
+        context: { ticks: 0 },
+        states: {
+          idle: {
+            on: {
+              TICK: {
+                guard: () => gate.promise,
+                actions: [
+                  ({ context }) => {
+                    context.ticks += 1;
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+      { maxQueueDepth },
+    );
+
+    return { machine, gate };
+  };
+
+  it("accepts submissions up to the configured depth", async () => {
+    const { machine, gate } = gatedMachine(2);
+
+    const first = machine.send("TICK");
+    const second = machine.send("TICK");
+
+    await expect(machine.send("TICK")).rejects.toBeInstanceOf(QueueOverflowError);
+
+    gate.resolve(true);
+    await expect(first).resolves.toMatchObject({ revision: 1 });
+    await expect(second).resolves.toMatchObject({ revision: 2 });
+    expect(machine.context).toEqual({ ticks: 2 });
+  });
+
+  it("refuses without queueing, so a refused submission never runs", async () => {
+    const { machine, gate } = gatedMachine(2);
+
+    const first = machine.send("TICK");
+    const second = machine.send("TICK");
+    const refused = machine.send("TICK");
+
+    await expect(refused).rejects.toBeInstanceOf(QueueOverflowError);
+
+    gate.resolve(true);
+    await Promise.all([first, second]);
+    await machine.whenIdle();
+
+    // Two events ran, not three.
+    expect(machine.context).toEqual({ ticks: 2 });
+    expect(machine.snapshot().revision).toBe(2);
+  });
+
+  it("counts the running submission against the cap", async () => {
+    const { machine, gate } = gatedMachine(1);
+
+    const running = machine.send("TICK");
+    await expect(machine.can("TICK")).rejects.toBeInstanceOf(QueueOverflowError);
+
+    gate.resolve(true);
+    await running;
+
+    // The slot is free again once the queue drains.
+    await expect(machine.can("TICK")).resolves.toBe(true);
+  });
+
+  it("counts queued reads and restores the same as queued events", async () => {
+    const { machine, gate } = gatedMachine(2);
+
+    const check = machine.can("TICK");
+    const restored = machine.restore(machine.snapshot());
+
+    await expect(machine.send("TICK")).rejects.toBeInstanceOf(QueueOverflowError);
+
+    gate.resolve(true);
+    await expect(check).resolves.toBe(true);
+    await expect(restored).resolves.toMatchObject({ state: "idle", revision: 0 });
+  });
+
+  it("leaves the queue unbounded when the option is absent", async () => {
+    const machine = createMachine({
+      id: "unbounded",
+      initial: "idle",
+      context: {},
+      states: { idle: { on: { TICK: {} } } },
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: 50 }, () => machine.send("TICK")),
+    );
+
+    expect(results).toHaveLength(50);
+    expect(machine.snapshot().revision).toBe(50);
   });
 });
