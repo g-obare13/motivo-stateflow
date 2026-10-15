@@ -10,3 +10,12 @@ coverage
 
 # Editor and OS files
 .DS_Store
+
+# graft's local graph cache: regenerable, not committed (run `graft build`).
+graft/
+.claude
+.gemini
+GEMINI.md
+.github/copilot-instructions.md
+.mcp.json
+
