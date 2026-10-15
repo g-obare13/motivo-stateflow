@@ -19,6 +19,11 @@
   without resetting a subtree is now expressed by omitting `target`; changing state is expressed by
   naming it, including for a self-transition (`RESET: { target: "editing" }`), which still exits and
   re-enters the state and everything below it.
+- A machine definition that declares a top-level `on` map is now rejected by `createMachine()` with
+  `UnsupportedDefinitionKeyError` (`code`: `ERR_UNSUPPORTED_DEFINITION_KEY`) instead of being
+  ignored. Previously such a definition created a machine that silently never reacted to those
+  events, because transitions belong to the states that declare them and a machine has no state of
+  its own. Move the map onto the state that should react.
 
 ### Added
 
@@ -31,6 +36,9 @@
   configuration, which is the only field that can express a parallel state.
 - `UnsupportedSnapshotVersionError` and `UnsupportedTransitionTypeError`, both subclasses of the
   existing error for their category.
+- `UnsupportedDefinitionKeyError` for a definition that declares a field the machine does not own.
+- `UnsupportedTransitionTypeError.code` and `UnsupportedSnapshotVersionError.code` join the new
+  `UnsupportedDefinitionKeyError.code`, so all three can be handled without matching message text.
 - `migrateSnapshotV1ToV2`, exported so stored data can be upgraded ahead of a restore.
 
 ### Fixed

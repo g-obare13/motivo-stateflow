@@ -1724,6 +1724,11 @@ Returns a machine. The definition is validated eagerly: a malformed definition t
 | `events`  | no       | Optional type-only map from event names to payload shapes; use `undefined` for payload-free events. |
 | `states`  | yes      | Map of state name to state definition. Every transition target must be a declared state.    |
 
+A top-level `on` map is rejected with `UnsupportedDefinitionKeyError` (`code`:
+`ERR_UNSUPPORTED_DEFINITION_KEY`) rather than ignored, because a machine has no state of its own to
+transition from: transitions belong to the state that reacts to them. This is a compile error as
+well, since the definition type declares `on` as `never`.
+
 #### Machine options
 
 | Option | Type | Description |
@@ -1931,15 +1936,23 @@ them, so `event` and `previous` are filled in. Snapshots from `machine.snapshot(
 
 #### Exported errors
 
-| Error | Raised when |
-| --- | --- |
-| `StateflowError` | Base class for every library error. |
-| `MachineConfigurationError` | The definition is malformed, or the context/event payload cannot be cloned. |
-| `InvalidEventError` | The event is malformed or declared nowhere in the machine. |
-| `InvalidTransitionError` | The event is declared but not accepted in the current state. |
-| `GuardRejectedError` | A guard returned `false`. |
-| `QueueOverflowError` | A submission arrived while the queue was already at `maxQueueDepth`. |
-| `SnapshotValidationError` | `restore()` received a malformed snapshot. |
+| Error | `code` | Raised when |
+| --- | --- | --- |
+| `StateflowError` | - | Base class for every library error. |
+| `MachineConfigurationError` | - | The definition is malformed, or the context/event payload cannot be cloned. |
+| `UnsupportedDefinitionKeyError` | `ERR_UNSUPPORTED_DEFINITION_KEY` | The definition declares a top-level `on`; its `key` reports the field. |
+| `UnsupportedTransitionTypeError` | `ERR_UNSUPPORTED_TRANSITION_TYPE` | A transition declares `type`; internal transitions are not implemented. |
+| `InvalidEventError` | - | The event is malformed or declared nowhere in the machine. |
+| `InvalidTransitionError` | - | The event is declared but not accepted in the current state. |
+| `GuardRejectedError` | - | A guard returned `false`. |
+| `QueueOverflowError` | - | A submission arrived while the queue was already at `maxQueueDepth`. |
+| `SnapshotValidationError` | - | `restore()` received a malformed snapshot. |
+| `UnsupportedSnapshotVersionError` | `ERR_UNSUPPORTED_SNAPSHOT_VERSION` | `restore()` received a snapshot format version it does not know; `receivedVersion` reports it. |
+
+Every error extends `StateflowError`, and the errors raised while reading a definition or a snapshot
+extend `MachineConfigurationError` and `SnapshotValidationError` respectively, so handling by class
+keeps working when a new specific error is added. Switch on `code` when the wording of a message
+must not matter.
 
 ---
 

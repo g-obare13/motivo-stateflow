@@ -29,6 +29,7 @@ implementation is a bug in the implementation, not a licence to update this docu
 | ST4 | A history pseudo-state is a child of the state whose configuration it remembers. It is declared with `type: "history"`, `history: "shallow" \| "deep"` (default `"shallow"`), and an optional `target`. It must not declare `states`, `initial`, `on`, `entry` or `exit`. |
 | ST5 | A history pseudo-state is never active, never appears in a configuration, and is not a legal value for `initial`. It must have a parent state, so a top-level history pseudo-state is a configuration error. |
 | ST6 | State paths are the keys from the top level joined with dots. A key must not contain a dot. Document order is the depth-first, pre-order walk of the `states` maps in declaration order, so an ancestor precedes its descendants and siblings follow declaration order. |
+| ST7 | A definition declares no transitions of its own: a top-level `on` map is a configuration error (`UnsupportedDefinitionKeyError`, code `ERR_UNSUPPORTED_DEFINITION_KEY`), not a handler for the whole machine. Transitions belong to the state that selects them, which is also where `state` and `event` are narrowed for guards and hooks. |
 
 `ST6` is the order SCXML calls document order. It has three uses: it ranks conflicting transitions
 (`TS4`), it orders exit and entry (`EO1`, `EO2`), and it orders the reported configuration (`CF4`).
@@ -257,6 +258,16 @@ on: {
 `AUDIT` reacts without moving anything. `RESET` names its own state, so it is an external
 self-transition: the state and everything below it is exited and entered again.
 
+### Rejecting a machine-level handler
+
+A definition's `on` map belongs to a state (`ST7`). The field used to be ignored, which turned a
+misplaced handler into a machine that never reacted to its event; it is now rejected at creation.
+
+The engine narrows `state` and `event` from the state that declares a transition, and the machine
+itself is not a declared state, so a machine-level handler has no source to type against and no
+document-order position among its siblings. Declare the transition on the state that reacts, or on
+each state that should react.
+
 ## Non-goals
 
 Internal transitions (`X5`), final states and completion events, internal and delayed events,
@@ -272,6 +283,7 @@ Test files: `tests/parallel.test.ts`, `tests/history.test.ts`, `tests/ordering.t
 | Rule | Test |
 | --- | --- |
 | ST1 to ST6 | `parallel.test.ts` and `history.test.ts`: kind inference, `type` validation errors, document order of a mixed tree. |
+| ST7 | `creation.test.ts`: a top-level `on` is refused with `UnsupportedDefinitionKeyError`, its stable code and key, and `on: undefined` is accepted. |
 | CF1 to CF3, CF7 to CF9 | `parallel.test.ts`: canonical configuration order, `matches` for parallel states and regions, `getNextEvents` document order, `done` across regions. |
 | CF4 to CF6 | `snapshots.test.ts`: `configuration`, `state` and `previous` for parallel and sequential machines. |
 | TS2 to TS6 | `parallel.test.ts`: per-region candidates, deduplication on a shared ancestor, conflict, precedence by depth, the document-order tie-break when sibling regions target outside the parallel state. |
@@ -289,6 +301,7 @@ Test files: `tests/parallel.test.ts`, `tests/history.test.ts`, `tests/ordering.t
 | AT1 to AT6 | `parallel.test.ts` and `actions.test.ts`: one region's action throwing leaves the sibling region uncommitted and the revision unchanged, with no notification. |
 | TY1 to TY4 | `types.test-d.ts`: parallel paths inferred, history path rejected by `matches`, accepted as a target, and the `type` and `history` validation compile-time rejections. |
 | Spec-derived ordering | `ordering.test.ts`: the SCXML external-transition ordering rules exercised through compound and parallel fixtures, asserting the exit sequence (innermost first) and the entry sequence (outermost first) for targets inside the domain, in a sibling subtree, and outside the parallel state. |
+| ST6/TD1/TS4 oracles | `graph.test.ts`: `intersects`, `isDescendantOf` and `leastCommonCompoundAncestor` are compared with brute-force implementations over generated trees that include parallel states, because those three functions decide which states exit and when two regions conflict. |
 
 ### Required properties
 
@@ -302,6 +315,11 @@ sequences:
 2. "restores a serialized snapshot into an indistinguishable machine": a restored machine has the
    same configuration, context, `done`, history, `getNextEvents()` and outcome for the next event as
    the machine it was serialized from.
+
+`tests/graph.test.ts` adds oracle properties for the tree helpers: for generated trees and generated
+selections of states it checks `intersects` against a scan, `isDescendantOf` against an ancestor
+walk, and `leastCommonCompoundAncestor` (`TD1`) against the deepest compound ancestor that is
+strictly above every state in the selection.
 
 ### Regression requirement
 
