@@ -130,12 +130,12 @@ test("infers guard, action and lifecycle arguments", () => {
         entry: [
           (args) => {
             expectTypeOf(args.context).toEqualTypeOf<{ count: number }>();
-            expectTypeOf(args.state).toEqualTypeOf<"a" | "b">();
+            expectTypeOf(args.state).toEqualTypeOf<"a">();
           },
         ],
         exit: [
           (args) => {
-            expectTypeOf(args.state).toEqualTypeOf<"a" | "b">();
+            expectTypeOf(args.state).toEqualTypeOf<"a">();
           },
         ],
         on: {
@@ -286,11 +286,14 @@ test("keeps the state union precise when a definition is annotated", () => {
   expectTypeOf(machine.state).toEqualTypeOf<OrderState>();
 });
 
-test("requires an annotation when a definition is held in a mutable variable", () => {
-  // A mutable variable widens `initial` to `string`, which cannot be checked against the state
-  // union. Annotating it with `MachineDefinition<...>` (or using `as const` on the literals)
-  // keeps inference precise; without that, the definition is rejected.
-  const definition = {
+test("documents what a definition held in a mutable variable needs", () => {
+  type OrderState = "pending" | "confirmed";
+  type OrderEvent = "CONFIRM";
+  type OrderContext = Record<string, never>;
+
+  // A plain mutable variable widens `initial` to `string` and the target to `string`, so there is
+  // nothing left for the compiler to check against the state union.
+  const widened = {
     id: "order",
     initial: "pending",
     context: {},
@@ -300,8 +303,22 @@ test("requires an annotation when a definition is held in a mutable variable", (
     },
   };
 
-  // @ts-expect-error `initial` has widened to string; annotate the definition instead
-  createMachine(definition);
+  // @ts-expect-error `initial` has widened to string; annotate or assert the definition instead
+  createMachine(widened);
+
+  // `satisfies` checks the shape without widening the literals, which keeps the union precise.
+  const checked = {
+    id: "order",
+    initial: "pending",
+    context: {},
+    states: {
+      pending: { on: { CONFIRM: "confirmed" } },
+      confirmed: {},
+    },
+  } satisfies MachineDefinition<OrderContext, OrderState, OrderEvent>;
+
+  const machine = createMachine(checked);
+  expectTypeOf(machine.state).toEqualTypeOf<OrderState>();
 });
 
 test("types the machine options", () => {
@@ -328,4 +345,135 @@ test("types the machine options", () => {
 
   // @ts-expect-error schemaVersion is a number
   createMachine(definition, { schemaVersion: "2" });
+});
+
+test("narrows the state and event a transition is declared under", () => {
+  createMachine({
+    id: "narrowed",
+    initial: "a",
+    context: { count: 0 },
+    states: {
+      a: {
+        on: {
+          GO: {
+            target: "b",
+            guard: (args) => {
+              expectTypeOf(args.state).toEqualTypeOf<"a">();
+              expectTypeOf(args.event).toEqualTypeOf<"GO">();
+              return args.context.count >= 0;
+            },
+            actions: [
+              (args) => {
+                expectTypeOf(args.state).toEqualTypeOf<"a">();
+                expectTypeOf(args.event).toEqualTypeOf<"GO">();
+              },
+            ],
+          },
+          CANCEL: {
+            guard: (args) => {
+              expectTypeOf(args.event).toEqualTypeOf<"CANCEL">();
+              return true;
+            },
+          },
+        },
+      },
+      b: {
+        entry: [
+          (args) => {
+            // Entry hooks keep the machine-wide event union: which event enters varies, but the
+            // state being entered does not.
+            expectTypeOf(args.state).toEqualTypeOf<"b">();
+            expectTypeOf(args.event).toEqualTypeOf<"GO" | "CANCEL" | "BACK">();
+          },
+        ],
+        exit: [
+          (args) => {
+            expectTypeOf(args.state).toEqualTypeOf<"b">();
+          },
+        ],
+        on: {
+          BACK: {
+            guard: (args) => {
+              expectTypeOf(args.state).toEqualTypeOf<"b">();
+              expectTypeOf(args.event).toEqualTypeOf<"BACK">();
+              return true;
+            },
+          },
+        },
+      },
+    },
+  });
+});
+
+test("rejects a guard that reaches for a state it is not declared in", () => {
+  createMachine({
+    id: "cross-state",
+    initial: "a",
+    context: {},
+    states: {
+      a: { on: { GO: "b" } },
+      b: {
+        on: {
+          BACK: {
+            target: "a",
+            guard: ({ state }) => {
+              // @ts-expect-error a transition declared in "b" only ever runs while in "b"
+              return state === "a";
+            },
+          },
+        },
+      },
+    },
+  });
+});
+
+test("rejects a guard that reads an event its own state does not declare", () => {
+  createMachine({
+    id: "cross-event",
+    initial: "a",
+    context: {},
+    states: {
+      a: { on: { GO: "b" } },
+      b: {
+        on: {
+          BACK: {
+            target: "a",
+            guard: ({ event }) => {
+              // @ts-expect-error "GO" is declared in "a", not in "b"
+              return event === "GO";
+            },
+          },
+        },
+      },
+    },
+  });
+});
+
+test("accepts a definition written with as const", () => {
+  const definition = {
+    id: "frozen",
+    initial: "pending",
+    context: {},
+    states: {
+      pending: { on: { CONFIRM: "confirmed" } },
+      confirmed: { entry: [() => undefined] },
+    },
+  } as const;
+
+  const machine = createMachine(definition);
+  expectTypeOf(machine.state).toEqualTypeOf<"pending" | "confirmed">();
+  expectTypeOf<Parameters<typeof machine.send>[0]>().toEqualTypeOf<"CONFIRM">();
+});
+
+test("types can() and getNextEvents()", () => {
+  expectTypeOf(orderMachine.can).returns.toEqualTypeOf<Promise<boolean>>();
+  expectTypeOf(orderMachine.getNextEvents()).toEqualTypeOf<OrderEvent[]>();
+  expectTypeOf(orderMachine.can("CONFIRM")).resolves.toEqualTypeOf<boolean>();
+
+  // @ts-expect-error "UNKNOWN_EVENT" is not declared by the machine
+  void orderMachine.can("UNKNOWN_EVENT");
+
+  // @ts-expect-error the returned array is the declared event union
+  const events: "TOGGLE"[] = orderMachine.getNextEvents();
+  void events;
 });

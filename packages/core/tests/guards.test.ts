@@ -164,6 +164,7 @@ describe("guards", () => {
   });
 
   it("evaluates each queued event against the state committed by the previous one", async () => {
+    const observed: string[] = [];
     const machine = createMachine({
       id: "gate",
       initial: "closed",
@@ -172,7 +173,16 @@ describe("guards", () => {
         closed: { on: { OPEN: "open" } },
         open: {
           on: {
-            OPEN: { target: "open", guard: ({ state }) => state === "closed" },
+            OPEN: {
+              target: "open",
+              // Declared in `open`, so this guard can only run in `open`. Recording the state it
+              // observes pins that the queued event is evaluated against the state the previous
+              // event committed, not the stale one.
+              guard: ({ state }) => {
+                observed.push(state);
+                return false;
+              },
+            },
           },
         },
       },
@@ -181,6 +191,7 @@ describe("guards", () => {
     await machine.send("OPEN");
     await expect(machine.send("OPEN")).rejects.toBeInstanceOf(GuardRejectedError);
     expect(machine.state).toBe("open");
+    expect(observed).toEqual(["open"]);
   });
 
   it("does not let a slow guard commit against stale state", async () => {

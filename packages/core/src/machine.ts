@@ -68,8 +68,8 @@ type ListenerRecord<TContext, TState extends string, TEvent extends string> = {
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
  * @param definition - Declarative machine definition.
- * @returns A runtime machine exposing `id`, `state`, `context`, `send`, `subscribe`, `snapshot`,
- * `restore`, `whenIdle` and `toJSON`.
+ * @returns A runtime machine exposing `id`, `state`, `context`, `send`, `can`, `getNextEvents`,
+ * `subscribe`, `snapshot`, `restore`, `whenIdle` and `toJSON`.
  * @throws {MachineConfigurationError} When the definition is malformed.
  *
  * @example
@@ -232,8 +232,18 @@ export function createMachine<TContext extends object, TState extends string, TE
     return event;
   };
 
+  /**
+   * Looks up the transition a state declares for an event, or `undefined` when the state declares
+   * none. Shared by `send()` and `can()` so both agree on what is accepted where.
+   */
+  const findTransition = (
+    state: TState,
+    event: string,
+  ): NormalizedTransition<TContext, TState, TEvent> | undefined =>
+    states.get(state)?.transitions.get(event);
+
   const resolveTransition = (event: string): NormalizedTransition<TContext, TState, TEvent> => {
-    const transition = states.get(currentState)?.transitions.get(event);
+    const transition = findTransition(currentState, event);
     if (transition) {
       return transition;
     }
@@ -324,6 +334,34 @@ export function createMachine<TContext extends object, TState extends string, TE
     },
     send(event: TEvent): Promise<MachineSnapshot<TContext, TState, TEvent>> {
       return enqueue(() => runTransition(event));
+    },
+    /**
+     * Reports whether the event would be accepted, queued behind pending events. The guard runs
+     * against a staging clone and nothing is committed: no hooks, no notification, no revision
+     * change. See {@link Machine.can} for the full contract.
+     */
+    can(event: TEvent): Promise<boolean> {
+      return enqueue(async () => {
+        const eventName = normaliseEvent(event);
+        const transition = findTransition(currentState, eventName);
+        if (!transition) {
+          return false;
+        }
+        if (!transition.guard) {
+          return true;
+        }
+        return Boolean(
+          await transition.guard({
+            context: cloneContext(currentContext),
+            state: currentState,
+            event,
+          }),
+        );
+      });
+    },
+    /** Declared events of the committed state, in declaration order. Guards are not evaluated. */
+    getNextEvents(): TEvent[] {
+      return [...(states.get(currentState)?.transitions.keys() ?? [])] as TEvent[];
     },
     subscribe(listener: Subscription<TContext, TState, TEvent>): Unsubscribe {
       if (typeof listener !== "function") {

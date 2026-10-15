@@ -39,6 +39,7 @@ import { createMachine } from "motivo-stateflow";
   - [9. Running several machines](#9-running-several-machines)
   - [10. Testing a machine](#10-testing-a-machine)
   - [11. Encapsulating a machine in a service](#11-encapsulating-a-machine-in-a-service)
+  - [12. Gating actions with can()](#12-gating-actions-with-can)
 - [Use cases](#use-cases)
   - [Order fulfillment](#order-fulfillment)
   - [Payment and subscription lifecycle](#payment-and-subscription-lifecycle)
@@ -215,6 +216,9 @@ console.log(snapshot.event); // "ASSIGN"
 console.log(snapshot.revision); // 1
 ```
 
+To ask what the current state accepts before sending anything, use `getNextEvents()` and `can()` (see
+[Inspection](#inspection)).
+
 ### 3. Add guards, actions and context updates
 
 A guard decides whether a transition may happen; actions run after the decision, and receive a
@@ -351,6 +355,7 @@ That is the whole core surface. Everything below goes deeper into patterns, use 
 | **Context** | The typed data attached to the machine. Deep cloned at every public boundary, so it behaves immutably from the outside. |
 | **Snapshot** | An immutable view: `id`, `state`, `context`, `event`, `previous`, `revision`, `done`. |
 | **Queue** | The per-machine FIFO that serializes events. Guarantees no stale-state commits and no interleaved hooks. |
+| **Inspection** | Read-only views of the machine: `getNextEvents()` lists what the committed state declares, and `can(event)` reports whether a transition would commit without committing it. |
 | **Revision** | Monotonic counter of committed transitions on that instance. Failed transitions do not increment it. |
 
 ---
@@ -886,6 +891,54 @@ await service.confirm();
 console.log(await service.process()); // "processing"
 console.log(service.status); // "processing"
 ```
+
+### 12. Gating actions with `can()`
+
+`can()` answers what `send()` would do without doing it, which is what a button, a queue consumer or
+a scheduler needs before it offers an action. Nothing is committed, so it is safe to call as often as
+you like.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+const createUploadMachine = (hasQuota: boolean) =>
+  createMachine({
+    id: "upload",
+    initial: "idle",
+    context: { hasQuota },
+    states: {
+      idle: {
+        on: { START: { target: "uploading", guard: ({ context }) => context.hasQuota } },
+      },
+      uploading: { on: { COMPLETE: "done", FAIL: "idle" } },
+      done: {},
+    },
+  });
+
+const machine = createUploadMachine(false);
+
+console.log(machine.getNextEvents()); // ["START"]
+console.log(await machine.can("START")); // false: the guard rejects
+console.log(machine.state); // "idle", so the machine was never touched
+
+// An event the current state does not declare is false, not an error.
+console.log(await machine.can("COMPLETE")); // false
+
+// A machine that can accept the event lets the same gate through.
+const ready = createUploadMachine(true);
+await ready.send("START");
+
+console.log(ready.getNextEvents()); // ["COMPLETE", "FAIL"]
+console.log(await ready.can("COMPLETE")); // true
+
+if (await ready.can("COMPLETE")) {
+  await ready.send("COMPLETE");
+}
+console.log(ready.state); // "done"
+```
+
+Drive a UI with the same two calls: `getNextEvents()` for what to render as available, `can()` for
+what to enable.
 
 ---
 
@@ -1447,11 +1500,11 @@ console.log(machine.snapshot().schemaVersion); // 2
 
 #### State definition
 
-| Field   | Type                                | Description                                                                 |
-| ------- | ----------------------------------- | --------------------------------------------------------------------------- |
-| `entry` | `ActionFn[]`                        | Actions run when the state is entered (after transition actions).            |
-| `exit`  | `ActionFn[]`                        | Actions run when the state is left (before transition actions).              |
-| `on`    | `Record<EventName, Transition>`     | Events accepted in this state and what they do.                              |
+| Field   | Type                                      | Description                                                        |
+| ------- | ----------------------------------------- | ------------------------------------------------------------------ |
+| `entry` | `ActionFn[]` or `readonly ActionFn[]`     | Actions run when the state is entered (after transition actions).   |
+| `exit`  | `ActionFn[]` or `readonly ActionFn[]`     | Actions run when the state is left (before transition actions).     |
+| `on`    | `Partial<Record<EventName, Transition>>`  | Events accepted in this state and what they do.                     |
 
 #### Transition forms
 
@@ -1492,6 +1545,9 @@ export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (ac
 - A guard that returns `false` rejects the transition with `GuardRejectedError`.
 - A guard or action that throws (or rejects) aborts the transition and propagates the original error.
 - Actions and hooks may be synchronous or asynchronous; they are awaited in declaration order.
+- Inside a definition, `state` and `event` are narrowed to where they are written
+  ([Per-state narrowing](#per-state-narrowing)). The signatures above spell out the machine-wide
+  unions, which is what you write when a guard is declared on its own.
 - **Treat guards as read-only.** The context they receive is mutable and mutations are committed, so
   mutate only in actions and hooks.
 
@@ -1503,11 +1559,76 @@ export const useArgs = (args: OrderArgs): boolean => guard(args) === true || (ac
 | `state` | `TState` | The committed state. |
 | `context` | `TContext` | A fresh clone of the committed context. |
 | `send` | `(event: TEvent) => Promise<MachineSnapshot>` | Queues an event. Resolves with the committed snapshot, or rejects with the failure. |
+| `can` | `(event: TEvent) => Promise<boolean>` | Queued check of whether the event would commit. Runs the guard, commits nothing. |
+| `getNextEvents` | `() => TEvent[]` | Events the committed state declares, in declaration order. Synchronous, never runs a guard. |
 | `subscribe` | `(listener: (snapshot) => void) => () => void` | Called once per committed transition. Returns an unsubscribe function. |
 | `snapshot` | `() => MachineSnapshot` | Immutable snapshot of the committed state, with a cloned context. |
 | `restore` | `(snapshot: unknown) => Promise<MachineSnapshot>` | Validates and applies a serialized snapshot, queued behind pending events. |
 | `whenIdle` | `() => Promise<void>` | Resolves when the queue is empty and every submitted event has settled. |
 | `toJSON` | `() => MachineSnapshot` | Used by `JSON.stringify(machine)`. |
+
+#### Inspection
+
+Two read-only helpers answer "what can happen next" without changing anything.
+
+`getNextEvents()` is synchronous and structural: the events the committed state declares, in
+declaration order, with no guard evaluation. Like `snapshot()`, it reads the committed state without
+waiting for queued events. A state with no outgoing transitions returns `[]`.
+
+`can(event)` is asynchronous and guard-aware: it answers what `send()` would do, without performing
+the transition. The event has to be declared in the committed state and its guard - synchronous or
+asynchronous - has to accept the pending context. No hooks run, no subscriber is notified, the
+revision does not move, and the machine stays on its current snapshot. Guards see a staging clone of
+the context, so a guard that writes to it cannot reach the machine from here.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+const machine = createMachine({
+  id: "order",
+  initial: "pending",
+  context: { paymentAuthorized: false },
+  states: {
+    pending: { on: { CONFIRM: "confirmed" } },
+    confirmed: {
+      on: { SHIP: { target: "shipped", guard: ({ context }) => context.paymentAuthorized } },
+    },
+    shipped: {},
+  },
+});
+
+console.log(machine.getNextEvents()); // ["CONFIRM"]
+console.log(await machine.can("SHIP")); // false: "pending" does not declare SHIP
+
+await machine.send("CONFIRM");
+console.log(machine.getNextEvents()); // ["SHIP"]
+console.log(await machine.can("SHIP")); // false: the guard rejects
+
+// Gating a call has no stale-answer risk:
+if (await machine.can("SHIP")) {
+  await machine.send("SHIP");
+}
+```
+
+The check is queued behind pending events, so it evaluates the transition as it would run once
+everything already submitted has settled. That is what makes the answer match what `send()` would do
+at the same point:
+
+```ts
+machine.send("CONFIRM");
+// Queued behind the send above, so this asks about "confirmed", not "pending".
+const answer = await machine.can("SHIP");
+```
+
+Two behaviours are worth knowing before leaning on it:
+
+- An event the committed state does not declare resolves to `false` instead of rejecting, so a
+  dynamic caller can ask about anything. A non-string event still rejects with `InvalidEventError`,
+  and a guard that throws rejects with the original error, exactly as `send()` does.
+- `can()` runs guards, so a guard with side effects of its own is observable here too. The machine is
+  untouched: only the guard runs, and only against a clone.
+
+Because a running check is pending work, `whenIdle()` waits for it.
 
 #### `MachineSnapshot`
 
@@ -1744,23 +1865,90 @@ What the compiler enforces:
   that no transition targets (an entry-only, planned or unreachable state).
 - Unknown event names are rejected at the call site.
 - `initial` and every transition target (shorthand and object form) must be a declared state.
-- Guards, actions and hooks receive the typed context and the machine's state/event unions.
+- Guards, actions and hooks receive the typed context, plus the state and event they are narrowed
+  to (see [Per-state narrowing](#per-state-narrowing)).
 - The context type flows into guards, actions, hooks, snapshots and subscribers.
+
+### Per-state narrowing
+
+Everything you declare inside a state is narrowed to that state, so the compiler rejects a reach
+that the runtime could never take:
+
+- `state` is the state that declares the hook, guard or action. A guard written in `confirmed` sees
+  `"confirmed"`, so comparing it against `"pending"` is a compile error.
+- `event` is the event the transition is declared under. A guard under `CONFIRM` sees `"CONFIRM"`,
+  so it cannot be written to react to an event its own state does not declare.
+- Entry and exit hooks keep the machine-wide event union, because more than one transition can lead
+  into a state, while their `state` is still the state that declares them.
+
+```ts
+import { createMachine } from "motivo-stateflow";
+
+const machine = createMachine({
+  id: "order",
+  initial: "pending",
+  context: { paymentAuthorized: false },
+  states: {
+    pending: {
+      on: {
+        CONFIRM: {
+          target: "confirmed",
+          guard: ({ state, event }) => {
+            // state is "pending", event is "CONFIRM"
+            return state === "pending" && event === "CONFIRM";
+          },
+        },
+      },
+    },
+    confirmed: {
+      entry: [
+        ({ state }) => {
+          // state is "confirmed"
+          console.log(`entered ${state}`);
+        },
+      ],
+      on: {
+        SHIP: {
+          target: "shipped",
+          guard: ({ state }) => {
+            // @ts-expect-error a guard declared in "confirmed" only ever runs in "confirmed"
+            return state === "pending";
+          },
+        },
+      },
+    },
+    shipped: {},
+  },
+});
+
+console.log(machine.state); // "pending"
+```
+
+Nothing about this changes the runtime behaviour: it is the same transition engine, with the types
+tightened to say exactly what it does.
 
 ### Keeping the union precise
 
-The state and event unions are built from the keys of your definition, so the definition must keep
-its literal types. An inline object literal does this automatically. A definition kept in a mutable
-variable widens (`initial` becomes `string`), so annotate it:
+The state and event unions are built from the keys of your definition, so the definition has to keep
+its literal types. An inline object literal does this automatically. A definition held in a mutable
+variable widens (`initial` and every target become `string`), which leaves the compiler nothing to
+check against the union, so hold it in one of these forms instead:
+
+- `satisfies MachineDefinition<...>`, which validates the shape and keeps the literals.
+- An annotation, `const definition: MachineDefinition<...> = { ... }`, where the type arguments
+  supply the unions.
+- `as const`, which is accepted because hook and action lists may be readonly arrays.
+- A factory function, because a returned object literal keeps its literals.
 
 ```ts
 import { createMachine } from "motivo-stateflow";
 import type { MachineDefinition } from "motivo-stateflow";
 
+type OrderContext = Record<string, never>;
 type OrderState = "pending" | "confirmed";
 type OrderEvent = "CONFIRM";
 
-const definition: MachineDefinition<Record<string, never>, OrderState, OrderEvent> = {
+const definition = {
   id: "order",
   initial: "pending",
   context: {},
@@ -1768,7 +1956,7 @@ const definition: MachineDefinition<Record<string, never>, OrderState, OrderEven
     pending: { on: { CONFIRM: "confirmed" } },
     confirmed: {},
   },
-};
+} satisfies MachineDefinition<OrderContext, OrderState, OrderEvent>;
 
 const machine = createMachine(definition);
 const state: OrderState = machine.state;
@@ -1802,9 +1990,9 @@ packed tarball into a throwaway project and type checks it with `skipLibCheck` d
 
 What stays a runtime concern (and is covered by validation + tests):
 
-- Which events are accepted in *which* state. A guard declared in one state still receives the
-  machine-wide state and event unions, so a comparison such as `state === "pending"` compiles inside
-  another state's guard. Narrowing these parameter types per state is on the roadmap.
+- Which events are accepted in *which* state for callers the compiler cannot see, such as plain
+  JavaScript, or data arriving from the network. Typed callers are covered by the compiler, and
+  everyone else by `can()` and `getNextEvents()` (see [Inspection](#inspection)).
 - State-dependent context rules (`can only ship after payment`).
 - Anything arriving from the network, storage or plain JavaScript.
 
@@ -1822,24 +2010,23 @@ Current release: **0.1.0**. Known constraints, stated plainly:
 | No actor composition | One machine per process object; invoking child machines is on the roadmap. |
 | No durable execution | Snapshots can be persisted and restored, but there is no checkpointing, lease/ownership, or recovery loop. |
 | Unbounded queue | The internal queue has no depth limit or backpressure; `whenIdle()` is the only queue control. |
+| Guards run in `can()` | `can()` evaluates the guard to answer, so side effects inside a guard are observable during a check. The machine itself is never modified. |
 | Context must be plain and cloneable | `Date`, `Map` and `Set` survive cloning, but class instances lose their prototype and accessor properties are evaluated once at creation. Keep domain behaviour outside the context. |
 | Serialization is JSON-shaped | Non-JSON values (`bigint`, cyclic structures) make `JSON.stringify` throw, and `restore()` validates shape rather than your context's TypeScript type. Pass a `parseContext` option to validate and rehydrate the stored context; without it, a value of the wrong type can still be restored. `schemaVersion` rejects snapshots written by a different version of the machine. |
 | ESM-only | CommonJS must use `require`-of-ESM support or a dynamic `import()`. |
 | Minified class names | The published bundle mangles class identifiers, so the static `SomeError.name` is unreliable. Use `instanceof` and the instance's `error.name` - the constructors always set it correctly. |
-| Type inference | The state union follows the `states` map keys, so a state that nothing targets is still a valid declared state. The union therefore depends on literal types: annotate a definition that is stored in a mutable variable (see [Keeping the union precise](#keeping-the-union-precise)). |
+| Type inference | The state union follows the `states` map keys, so a state that nothing targets is still a valid declared state. The union therefore depends on literal types: a definition stored in a mutable variable needs `satisfies`, an annotation, `as const` or a factory (see [Keeping the union precise](#keeping-the-union-precise)). |
 
 Planned evolution (subject to change), aiming to keep the 0.1.0 API and semantics intact:
 
-1. **Typing hardening** - state unions derived from the `states` map (removing the caveat above),
-   per-state narrowing of guards/hooks, and `can()` / `getNextEvents()` inspection helpers.
-2. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, queue governance,
+1. **Extensibility groundwork** - compiled machine IR, injectable clock/randomness, queue governance,
    richer error taxonomy, inspection records.
-3. **Advanced states** - hierarchical and parallel states, history, internal/raised/delayed events,
+2. **Advanced states** - hierarchical and parallel states, history, internal/raised/delayed events,
    typed event payloads.
-4. **Actors and composition** - spawned child machines, message routing, supervision.
-5. **Workflow layer** - multi-machine sagas with compensation and human tasks.
-6. **Durable execution** - stores, checkpointing, recovery, migrations.
-7. **Tooling** - CLI, graph analysis, visualization, model-based testing, framework adapters.
+3. **Actors and composition** - spawned child machines, message routing, supervision.
+4. **Workflow layer** - multi-machine sagas with compensation and human tasks.
+5. **Durable execution** - stores, checkpointing, recovery, migrations.
+6. **Tooling** - CLI, graph analysis, visualization, model-based testing, framework adapters.
 
 ---
 
@@ -1864,6 +2051,7 @@ The suite is organised into focused files:
 | `tests/transitions.test.ts`   | Transitions, event resolution, terminal states, self-transitions.          |
 | `tests/guards.test.ts`        | Sync/async guards, argument shape, rejection, stale-state protection.      |
 | `tests/actions.test.ts`       | Hook ordering, async hooks, failure atomicity, context updates.            |
+| `tests/inspection.test.ts`    | `can()` and `getNextEvents()`: guard evaluation, queue ordering, read-only guarantees. |
 | `tests/concurrency.test.ts`   | FIFO ordering, queue recovery, `whenIdle()`, notification ordering.        |
 | `tests/subscriptions.test.ts` | Notification timing, unsubscription, subscriber isolation.                |
 | `tests/snapshots.test.ts`     | Serialization, restoration validation, immutability, queued restoration.   |

@@ -57,11 +57,24 @@ export type ActionFn<TContext, TState extends string, TEvent extends string> = (
  * self-transition: exit hooks, transition actions and entry hooks all run, and the state name
  * itself does not change.
  *
+ * A transition is written inside the state that declares it, so its guard and actions receive
+ * that state as `state` and the event they are declared under as `event`. Both are narrowed from
+ * the machine-wide unions, so a guard cannot compare `state` against a state it is not declared
+ * in, and cannot read an event the state does not declare.
+ *
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
+ * @typeParam TSource - State that declares this transition, narrowed to that single state.
+ * @typeParam TOwnEvent - Event this transition is declared under, narrowed to that single event.
  */
-export type TransitionDefinition<TContext, TState extends string, TEvent extends string> = {
+export type TransitionDefinition<
+  TContext,
+  TState extends string,
+  TEvent extends string,
+  TSource extends TState = TState,
+  TOwnEvent extends TEvent = TEvent,
+> = {
   /**
    * Declared state to enter. Defaults to the current state (self-transition).
    *
@@ -71,33 +84,46 @@ export type TransitionDefinition<TContext, TState extends string, TEvent extends
    */
   target?: NoInfer<TState>;
   /** Condition that must return `true` for the transition to be committed. */
-  guard?: GuardFn<TContext, NoInfer<TState>, NoInfer<TEvent>>;
+  guard?: GuardFn<TContext, TSource, TOwnEvent>;
   /** Actions executed after exit hooks and before entry hooks. */
-  actions?: Array<ActionFn<TContext, NoInfer<TState>, NoInfer<TEvent>>>;
+  actions?: ReadonlyArray<ActionFn<TContext, TSource, TOwnEvent>>;
 };
 
 /**
  * Declaration of a single state.
  *
+ * Lifecycle hooks run only while the machine is inside the state that declares them, so their
+ * `state` is narrowed to that single state. Their `event` stays the machine-wide union, because
+ * the event that enters or leaves a state varies with the transition being taken.
+ *
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TState - Union of declared state names.
  * @typeParam TEvent - Union of declared event names.
+ * @typeParam TKey - The state this definition belongs to, narrowed to that single state.
  */
-export type StateDefinition<TContext, TState extends string, TEvent extends string> = {
+export type StateDefinition<
+  TContext,
+  TState extends string,
+  TEvent extends string,
+  TKey extends TState = TState,
+> = {
   /** Hooks executed when the state is entered, after transition actions. */
-  entry?: Array<ActionFn<TContext, NoInfer<TState>, NoInfer<TEvent>>>;
+  entry?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<TEvent>>>;
   /** Hooks executed when the state is left, before transition actions. */
-  exit?: Array<ActionFn<TContext, NoInfer<TState>, NoInfer<TEvent>>>;
+  exit?: ReadonlyArray<ActionFn<TContext, TKey, NoInfer<TEvent>>>;
   /**
    * Event map for the state. A string value is shorthand for `{ target: value }`. A key that is
    * not declared here is not part of the machine's event union, so it cannot be sent.
    *
-   * The map's keys are the inference source for `TEvent`, and the shorthand target is wrapped in
-   * `NoInfer` for the same reason `target` is.
+   * The map's keys are the inference source for `TEvent`, and each entry receives its own key
+   * type so that a guard or action under `CONFIRM` sees `event` as `"CONFIRM"`. The shorthand
+   * target is wrapped in `NoInfer` for the same reason `target` is.
    */
-  on?: Partial<
-    Record<TEvent, NoInfer<TState> | TransitionDefinition<TContext, TState, TEvent>>
-  >;
+  on?: {
+    [TEventKey in TEvent]?:
+      | NoInfer<TState>
+      | TransitionDefinition<TContext, TState, TEvent, TKey, TEventKey>;
+  };
 };
 
 /**
@@ -106,6 +132,9 @@ export type StateDefinition<TContext, TState extends string, TEvent extends stri
  * `states` is keyed by state name, and it is the single source of the state union: every key
  * becomes part of `TState`, even a state that no transition targets (an entry-only or planned
  * state). `initial` and the transition targets are checked against that union.
+ *
+ * Hook and action lists accept mutable and readonly arrays alike, so a definition held in a
+ * `const` variable as `as const` or checked with `satisfies` is a valid input.
  *
  * @typeParam TContext - Shape of the machine context.
  * @typeParam TState - Union of declared state names.
@@ -123,8 +152,14 @@ export type MachineDefinition<TContext, TState extends string, TEvent extends st
   initial: NoInfer<TState>;
   /** Initial context. Must be a plain object and structured-cloneable. */
   context: TContext;
-  /** Declared states. Every transition target must be a key of this object. */
-  states: Record<TState, StateDefinition<TContext, TState, TEvent>>;
+  /**
+   * Declared states. Every transition target must be a key of this object.
+   *
+   * The mapped form feeds each key into its own state definition, which is what narrows the
+   * `state` and `event` a hook, guard or action receives. It is also the inference source for
+   * `TState`, so the state union is exactly the declared keys.
+   */
+  states: { [TKey in TState]: StateDefinition<TContext, TState, TEvent, TKey> };
 };
 
 /**
@@ -228,6 +263,39 @@ export interface Machine<TContext, TState extends string, TEvent extends string>
    * @returns The snapshot committed by this transition.
    */
   send(event: TEvent): Promise<MachineSnapshot<TContext, TState, TEvent>>;
+  /**
+   * Reports whether the event would be accepted, without committing anything.
+   *
+   * Answers the same question as `send()` without performing the transition: the event must be
+   * declared in the committed state, and its guard - synchronous or asynchronous - must accept
+   * the pending context. No hooks run, no subscriber is notified, the revision does not move and
+   * the machine stays on its current snapshot.
+   *
+   * The check is queued behind pending events, so it evaluates the transition as it would run
+   * once everything already submitted has settled. That makes the answer match what `send()`
+   * would do if it were called at the same point.
+   *
+   * An event that the committed state does not declare resolves to `false` rather than rejecting.
+   * A guard that throws rejects with the original error, exactly as `send()` does, so a broken
+   * guard cannot be mistaken for a rejected transition.
+   *
+   * Guards observe a staging clone of the context, as they do during a transition, so a guard
+   * that writes to the context it receives cannot reach the machine from here.
+   *
+   * @param event - Event name to test against the committed state.
+   * @returns `true` when the transition would commit, `false` when it would not.
+   */
+  can(event: TEvent): Promise<boolean>;
+  /**
+   * Lists the events the committed state declares, in declaration order.
+   *
+   * The answer is structural: it reports which events the state accepts and never evaluates
+   * guards, which is what `can()` is for. Like `snapshot()`, it reads the committed state without
+   * waiting for queued events. A terminal state declares no events and returns an empty array.
+   *
+   * @returns A fresh array of event names; mutating it affects nothing.
+   */
+  getNextEvents(): TEvent[];
   /**
    * Registers a listener called once per committed transition.
    *
